@@ -38,8 +38,7 @@ jobs:
     name: copilot-review-gate
     runs-on: ubuntu-latest
     steps:
-      # Pinned by commit SHA, version in the comment — see Pinning below.
-      - uses: hacker-cb/action-copilot-review-gate@6fc6eded7a975bbe2e5b9a8a1370ae3e003f9470 # v1.0.0
+      - uses: hacker-cb/action-copilot-review-gate@v1
 ```
 
 Then two settings, both in your branch ruleset:
@@ -59,39 +58,28 @@ context.
 from the PR head, so any PR opened before the file exists lacks the job entirely and
 would hang forever on the newly required check.
 
-### Pinning
+### Versions
 
-`@v1` is a **moving** tag: whatever it points at is what runs. For most actions that
-is the convenient half of the trade — a fix reaches you by someone moving one tag.
-Here it is sharper, because this action *is* the required check: a tag retargeted,
-by accident or by whoever gets hold of the repository, changes what your gate accepts
-with no pull request in your repository to review it.
+`@v1` is the form to use. It is a **moving major tag**: a fix here reaches you when
+the tag moves, which is the whole reason this ships as an action instead of a file
+you vendor — the gap that let one format change break the gate in several
+repositories at once. Dependabot raises the major when one ships; nothing else is
+needed to stay current.
 
-So pin by commit SHA, with the version in a trailing comment — the form used in the
-workflow above:
-
-```yaml
-      - uses: hacker-cb/action-copilot-review-gate@6fc6eded7a975bbe2e5b9a8a1370ae3e003f9470 # v1.0.0
-```
-
-The comment is not decoration: Dependabot reads it, bumps the SHA and rewrites the
-comment, so an upgrade arrives as a pull request reviewed like any other — which is
-what pinning buys rather than what it costs.
-
-**Take the SHA from the newest release**, on the
-[releases page](https://github.com/hacker-cb/action-copilot-review-gate/releases).
-The one spelled out above is `v1.0.0`, which is the last release whose hard ceiling
-[cannot escalate](#timeouts) — copy the example for its shape, not for its commit.
-
-`@v1` stays defensible where the check is **not** required, or where you would rather
-have fixes land on their own than review them.
+Pinning to a commit SHA also works, and some supply-chain policies require it for
+a check that is **required** — a moving tag is, by definition, something whose
+target can change without a pull request in your repository. The cost is that
+fixes to this gate then wait for a Dependabot PR rather than arriving on their
+own, and a gate that is a release behind is a gate that fails in the way the
+release fixed. Pick the one your policy actually asks for; where it does not ask,
+take `@v1`.
 
 ### With options
 
 Every input has a working default; set one only when you mean to.
 
 ```yaml
-      - uses: hacker-cb/action-copilot-review-gate@6fc6eded7a975bbe2e5b9a8a1370ae3e003f9470 # v1.0.0
+      - uses: hacker-cb/action-copilot-review-gate@v1
         with:
           wait-minutes: 20
           max-rerequests: 3
@@ -139,9 +127,9 @@ the script runs up to a full `poll-seconds` past its own window. Left out, a
 `poll-seconds: 300` would have the ceiling fire first and report a hang where the
 script was merely between polls.
 
-Escalation is newer than the pinned example above: releases up to `v1.0.0`
-terminate a hung gate without ever killing it, so a pin at or below that commit
-has a ceiling that waits for the process it signalled.
+Escalation arrived in `v1.0.1`; `v1.0.0` terminates a hung gate without ever
+killing it. `@v1` already carries it — a SHA pinned at or below that release does
+not.
 
 That ceiling is the **step's**, not the job's. A composite action cannot set
 `timeout-minutes` — only the workflow calling it can — so the ceiling begins when the
@@ -223,9 +211,8 @@ The gist itself now carries only that wrapper and a pointer here; its older revi
 remain in its history and are not a working gate against today's Copilot.
 
 What you gain: a fix ships once, here, instead of as a synchronising pull request per
-repository — the gap that let one format change break the gate everywhere at once. It
-reaches you by a moved tag if you track `@v1`, or as a Dependabot bump if you pin by
-SHA ([Pinning](#pinning)).
+repository — the gap that let one format change break the gate everywhere at once. On
+`@v1` it reaches you as soon as the tag moves ([Versions](#versions)).
 
 ## Development
 
