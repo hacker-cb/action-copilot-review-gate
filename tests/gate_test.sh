@@ -301,7 +301,7 @@ scenario "a timeout that cannot escalate is refused up front"
 action_step_script "$MOCK_DIR/step.sh"
 : > "$MOCK_DIR/no-kill-after"
 expect "step exit"     1     "$(step_status 15)"
-expect "diagnosis"     found "$(found 'does not accept')"
+expect "diagnosis"     found "$(found 'hard ceiling needs')"
 expect "gate not run"  0     "$(count "$MOCK_DIR/calls.timeout")"
 
 scenario "the numeric inputs are validated before anything computes with them"
@@ -328,5 +328,9 @@ expect "step exit" 0     "$(step_status 15 08)"
 expect "ceiling"   1028s "$(ceiling_window)"
 
 echo
-echo "passed: $pass, failed: $fail${skipped:+, skipped: $skipped}"
+summary="passed: $pass, failed: $fail"
+# A numeric test, not `${skipped:+…}`: "0" is a non-empty string, so that
+# form appends ", skipped: 0" to every clean run it was meant to leave alone.
+[ "$skipped" = 0 ] || summary="$summary, skipped: $skipped"
+echo "$summary"
 [ "$fail" = 0 ]

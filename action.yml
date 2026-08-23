@@ -103,12 +103,14 @@ runs:
             exit 1
           }
         done
-        # Presence is not enough: busybox ships a `timeout` without `--kill-after`,
-        # and the ceiling below is not a ceiling without it. Probe the flag on a
-        # command that returns at once, so a runner that cannot escalate says so
-        # here rather than hanging past a deadline it could not enforce.
+        # Presence is not enough: busybox ships a `timeout` that has neither
+        # `--kill-after` nor GNU's duration suffixes, and the ceiling below is not
+        # a ceiling without both. Probe the whole invocation on a command that
+        # returns at once, so a runner that cannot enforce the ceiling says so here
+        # rather than hanging past a deadline it never had. The message names the
+        # probe rather than one flag, because either half can be what failed.
         timeout --kill-after=1s 1s true >/dev/null 2>&1 || {
-          echo "::error::This \`timeout\` does not accept \`--kill-after\` (GNU coreutils does; busybox does not), so the gate's hard ceiling could not escalate past a hung process. Install coreutils on this runner."
+          echo "::error::This \`timeout\` does not support what the gate's hard ceiling needs: \`timeout --kill-after=1s 1s true\` failed. GNU coreutils accepts it; busybox's \`timeout\` has neither the flag nor the \`1s\` suffix. Install coreutils on this runner."
           exit 1
         }
         # Every numeric input, checked before anything computes with it. Each one
