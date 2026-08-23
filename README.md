@@ -96,9 +96,9 @@ Every input has a working default; set one only when you mean to.
 | Input | Default | What it does |
 |---|---|---|
 | `github-token` | `${{ github.token }}` | Reads the PR's reviews and re-requests one. Needs `pull-requests: write`. |
-| `wait-minutes` | `15` | How long to wait for the first genuine review before failing closed. The action wraps its own script in `timeout` at this value plus a two-minute grace — see [Timeouts](#timeouts) for what that ceiling does and does not cover. |
+| `wait-minutes` | `15` | How long to wait for the first genuine review before failing closed. The action wraps its own script in `timeout` at this value plus one poll interval plus a two-minute grace — see [Timeouts](#timeouts) for what that ceiling does and does not cover. |
 | `max-rerequests` | `2` | How many times to ask Copilot again after it answers without reviewing. Only successful requests count. |
-| `poll-seconds` | `30` | Seconds between polls of the reviews API. |
+| `poll-seconds` | `30` | Seconds between polls of the reviews API. Lands in the hard ceiling too, because the loop sleeps after testing its deadline. |
 | `reviewers` | two logins | Logins that count as Copilot, one per line. An allowlist, never a prefix. |
 | `review-markers` | two markers | Body substrings that mark a review as genuine, one per line; any one is enough. |
 
@@ -123,11 +123,21 @@ regardless of what the workflow declares, so the scope grants a fork nothing.
 ## Timeouts
 
 The action puts a deadline around the script it runs: `timeout` at `wait-minutes`
-plus a two-minute grace, escalating to `SIGKILL` ten seconds later if the process
-ignores the termination signal. Both numbers come from `wait-minutes`, so there is
-nothing to keep in sync — and the script's own window is what fires first, printing
-the bodies it saw next to the markers it matched them against before anything kills
-it.
+plus one `poll-seconds` interval plus a two-minute grace, escalating to `SIGKILL`
+ten seconds later if the process ignores the termination signal. Every number comes
+from the inputs, so there is nothing to keep in sync — and the script's own window
+is what fires first, printing the bodies it saw next to the markers it matched them
+against before anything kills it.
+
+The poll interval is in that sum because the loop tests its deadline *before*
+sleeping: the last sleep starts inside the window and one more poll follows it, so
+the script runs up to a full `poll-seconds` past its own window. Left out, a
+`poll-seconds: 300` would have the ceiling fire first and report a hang where the
+script was merely between polls.
+
+Escalation is newer than the pinned example above: releases up to `v1.0.0`
+terminate a hung gate without ever killing it, so a pin at or below that commit
+has a ceiling that waits for the process it signalled.
 
 That ceiling is the **step's**, not the job's. A composite action cannot set
 `timeout-minutes` — only the workflow calling it can — so the ceiling begins when the
@@ -137,9 +147,9 @@ GitHub's default of **360 minutes**, with your required check pending throughout
 
 Whether that gap is worth a job-level `timeout-minutes` is your call. It is not a
 duplicate of the ceiling above, and it is the only thing covering the gap — but keep
-it well clear of `wait-minutes` + 2 min: a backstop that fires first replaces the
-gate's diagnosis with a bare cancellation, which tells you nothing about why Copilot
-never reviewed. This repository's own gate workflow sets 25 minutes against the
+it well clear of the ceiling itself: a backstop that fires first replaces the gate's
+diagnosis with a bare cancellation, which tells you nothing about why Copilot never
+reviewed. This repository's own gate workflow sets 25 minutes against the
 default 15-minute window.
 
 ## What the gate does not protect
@@ -151,24 +161,33 @@ reports the same green name as always. That is true of every `pull_request` chec
 what makes it worth more here is that this one is the check standing between a branch
 and its ruleset.
 
-A fork is not the exposure: GitHub issues fork pull requests a read-only token
-whatever the workflow declares. A branch in your own repository is.
+Forks are not outside this. The read-only token GitHub issues them stops API
+writes, not check runs: a fork's `pull_request` run executes the fork's copy of the
+workflow, so once such a run is allowed to start it can report `copilot-review-gate`
+green with the gate replaced by `run: true`. What decides whether it starts is the
+approval setting for fork workflow runs (Settings → Actions → *Fork pull request
+workflows from outside collaborators*), which by default asks for approval only from
+first-time contributors.
 
 The defence is not a narrower token scope in the workflow. It is not letting the
 workflow change without a review of its own:
 
 - **CODEOWNERS** covering `.github/workflows/**`, with "require review from Code
-  Owners" in the branch ruleset, or
-- a **push ruleset** with a file-path restriction on `.github/workflows/`.
+  Owners" in the branch ruleset **and stale approvals dismissed when new commits
+  are pushed** — without that pairing, an approval given for a harmless workflow
+  edit still stands over the commit that guts the gate.
+- A **push ruleset** with a file-path restriction on `.github/workflows/` covers
+  branches in your own repository. A fork pushes to its own, so this one does not
+  stand in for the rule above where fork pull requests are accepted.
 
 `pull_request_target` is the other answer, and a real one: it takes the workflow
 definition from the base branch, so a pull request cannot run its own edit of the
 gate. It is not what this README recommends, because it carries a trap of its own —
-the job runs against the base branch with a write-capable token and access to
-secrets, so checking out the pull request's code under it hands a fork your
-repository. This action checks nothing out, which is what makes the swap thinkable at
-all; it has not been exercised in the field, so treat it as an option to verify
-rather than a recommendation to follow.
+the job runs against the base branch with the token the workflow declares, fork pull
+requests included, so checking out the pull request's code under it hands a fork
+your repository. This action checks nothing out, which is what makes the swap
+thinkable at all; it has not been exercised in the field, so treat it as an option
+to verify rather than a recommendation to follow.
 
 ## When Copilot changes its review format
 
