@@ -76,8 +76,12 @@ workflow above:
 
 The comment is not decoration: Dependabot reads it, bumps the SHA and rewrites the
 comment, so an upgrade arrives as a pull request reviewed like any other — which is
-what pinning buys rather than what it costs. Take the SHA from the release you mean
-to run, on the [releases page](https://github.com/hacker-cb/action-copilot-review-gate/releases).
+what pinning buys rather than what it costs.
+
+**Take the SHA from the newest release**, on the
+[releases page](https://github.com/hacker-cb/action-copilot-review-gate/releases).
+The one spelled out above is `v1.0.0`, which is the last release whose hard ceiling
+[cannot escalate](#timeouts) — copy the example for its shape, not for its commit.
 
 `@v1` stays defensible where the check is **not** required, or where you would rather
 have fixes land on their own than review them.
@@ -149,8 +153,8 @@ Whether that gap is worth a job-level `timeout-minutes` is your call. It is not 
 duplicate of the ceiling above, and it is the only thing covering the gap — but keep
 it well clear of the ceiling itself: a backstop that fires first replaces the gate's
 diagnosis with a bare cancellation, which tells you nothing about why Copilot never
-reviewed. This repository's own gate workflow sets 25 minutes against the
-default 15-minute window.
+reviewed. This repository's own gate workflow sets 25 minutes against a
+ceiling of 17.5 — the defaults, 15 min plus a 30-second poll plus the grace.
 
 ## What the gate does not protect
 

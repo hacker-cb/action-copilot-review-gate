@@ -21,7 +21,7 @@ REVIEWERS=$'copilot-pull-request-reviewer[bot]\ncopilot'
 MARKERS=$'pull request overview\n<summary>review details'
 
 rm -rf "$WORK"; mkdir -p "$WORK"
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 
 # Build a reviews array out of named fixtures: arr <n> <fixture> [<fixture>...]
 arr() {
@@ -86,11 +86,29 @@ run_step() { # run_step <wait-minutes> [poll-seconds] — the step's own script
   GITHUB_ACTION_PATH="$ROOT" \
   REPO="acme/widget" PR="42" \
   REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" \
-  WAIT_MINUTES_IN="$1" MAX_REREQUESTS=2 POLL_SECONDS="${2:-30}" \
+  WAIT_MINUTES_IN="$1" MAX_REREQUESTS="${MAX_REREQUESTS:-2}" POLL_SECONDS="${2:-30}" \
   bash "$step" > "$MOCK_DIR/out" 2>&1
 }
 step_status() { local rc=0; run_step "$@" || rc=$?; echo "$rc"; }
 found()       { if grep -q "$1" "$MOCK_DIR/out"; then echo found; else echo lost; fi; }
+# The duration `timeout` was asked for, from the LAST call: the preflight probe
+# does not reach this log, but a scenario running the step twice does.
+ceiling_window() {
+  sed -n 's/.*[[:space:]]\([0-9][0-9]*s\)[[:space:]][[:space:]]*bash[[:space:]].*/\1/p' \
+    "$MOCK_DIR/calls.timeout" 2>/dev/null | tail -1
+}
+# GNU coreutils' timeout, under either name — the escalation half of the ceiling
+# scenario runs the real thing, and BSD/macOS without coreutils has neither.
+gnu_timeout() {
+  local c
+  for c in timeout gtimeout; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>/dev/null | grep -q coreutils; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
+}
+skip() { printf '    skip  %-30s %s\n' "$1" "$2"; skipped=$(( skipped + 1 )); }
 
 # ---------------------------------------------------------------- happy paths
 
@@ -217,7 +235,7 @@ expect "step exit" 0 "$(step_status 15)"
 asked="$(cat "$MOCK_DIR/calls.timeout" 2>/dev/null || true)"
 signal_flag="$(printf '%s\n' "$asked" | grep -o -- '--signal=[^[:space:]]*'     | head -1 || true)"
 grace_flag="$(printf '%s\n' "$asked"  | grep -o -- '--kill-after=[^[:space:]]*' | head -1 || true)"
-window="$(printf '%s\n' "$asked" | sed -n 's/.*[[:space:]]\([0-9][0-9]*s\)[[:space:]][[:space:]]*bash[[:space:]].*/\1/p')"
+window="$(ceiling_window)"
 
 # 15 min + the 30-second poll interval + the two-minute grace. The poll interval
 # is in there because the loop sleeps AFTER testing its deadline, so the script
@@ -225,7 +243,8 @@ window="$(printf '%s\n' "$asked" | sed -n 's/.*[[:space:]]\([0-9][0-9]*s\)[[:spa
 expect "ceiling window"    1050s "$window"
 expect "escalation armed"  armed "$([ -n "$grace_flag" ] && echo armed || echo absent)"
 
-if [ -n "$grace_flag" ]; then
+real_timeout="$(gnu_timeout || true)"
+if [ -n "$grace_flag" ] && [ -n "$real_timeout" ]; then
   grace_seconds="${grace_flag##*=}"; grace_seconds="${grace_seconds%s}"
   # A child that ignores TERM. Bash passes an IGNORED disposition on to what it
   # starts, so the `sleep` ignores it too — which is why the group signal alone
@@ -245,7 +264,7 @@ SH
   # `exit $?` is what keeps that shell around to absorb the message instead of
   # exec'ing itself away and leaving this one to print it.
   # shellcheck disable=SC2016  # `$@` and `$?` are for the inner shell, by design
-  bash -c 'timeout "$@"; exit $?' _ \
+  bash -c '"$0" "$@"; exit $?' "$real_timeout" \
     "$signal_flag" "$grace_flag" 1s bash "$MOCK_DIR/ignores-term.sh" 2>/dev/null || rc=$?
   elapsed=$(( SECONDS - started ))
   # 137 is 128 + SIGKILL: killed. 124 would mean terminated and then waited out —
@@ -253,9 +272,14 @@ SH
   expect "killed, not waited out" 137 "$rc"
   expect "killed inside the grace" within \
     "$([ "$elapsed" -le $(( grace_seconds + 5 )) ] && echo within || echo "${elapsed}s")"
-else
+elif [ -z "$grace_flag" ]; then
   expect "killed, not waited out"  137    "not run — nothing to escalate with"
   expect "killed inside the grace" within "not run — nothing to escalate with"
+else
+  # Not a pass and not a failure of this change: without GNU coreutils there is
+  # no `timeout` here to escalate with. CI runs on ubuntu, where there is.
+  skip "killed, not waited out"  "no GNU timeout on PATH"
+  skip "killed inside the grace" "no GNU timeout on PATH"
 fi
 
 scenario "the ceiling says which way it ended"
@@ -280,14 +304,29 @@ expect "step exit"     1     "$(step_status 15)"
 expect "diagnosis"     found "$(found 'does not accept')"
 expect "gate not run"  0     "$(count "$MOCK_DIR/calls.timeout")"
 
-scenario "poll-seconds is validated like the wait window"
-# It reaches an arithmetic expansion in the ceiling, which evaluates what it is
-# handed rather than reading it as a number.
+scenario "the numeric inputs are validated before anything computes with them"
+# Each fails quietly in its own way: the two that reach the ceiling's arithmetic
+# expansion die there without an `::error::`, and a non-numeric max-rerequests
+# reaches a `[ -lt ]` inside an `if`, where `set -e` does not look — the gate
+# then never re-requests and reports "0 of abc allowed" as if that were a budget.
 action_step_script "$MOCK_DIR/step.sh"
-expect "non-numeric"  1     "$(step_status 15 abc)"
-expect "diagnosis"    found "$(found 'poll-seconds must be a whole number')"
-expect "zero"         1     "$(step_status 15 0)"
+expect "poll non-numeric"   1     "$(step_status 15 abc)"
+expect "poll diagnosis"     found "$(found 'poll-seconds must be a whole number')"
+expect "poll zero"          1     "$(step_status 15 0)"
+expect "budget non-numeric" 1     "$(MAX_REREQUESTS=abc step_status 15)"
+expect "budget diagnosis"   found "$(found 'max-rerequests must be a whole number')"
+expect "budget zero is fine" 0    "$(MAX_REREQUESTS=0 step_status 15)"
+
+scenario "a leading zero is read as decimal, not octal"
+# `08` dies in an arithmetic expansion ("value too great for base") and `030`
+# evaluates there as 24 while `sleep` reads the same string as 30 — a ceiling and
+# a loop running on different numbers.
+action_step_script "$MOCK_DIR/step.sh"
+expect "step exit" 0     "$(step_status 15 030)"
+expect "ceiling"   1050s "$(ceiling_window)"
+expect "step exit" 0     "$(step_status 15 08)"
+expect "ceiling"   1028s "$(ceiling_window)"
 
 echo
-echo "passed: $pass, failed: $fail"
+echo "passed: $pass, failed: $fail${skipped:+, skipped: $skipped}"
 [ "$fail" = 0 ]

@@ -24,10 +24,13 @@ jobs:
     # The action's ceiling bounds its own step and starts when that step does;
     # this bounds everything before it — a runner stalling on checkout or on
     # fetching the action, which would otherwise sit here for GitHub's default of
-    # 360 minutes with the required check pending throughout. Well clear of the
-    # default 15-minute window plus its two-minute grace, so what a consumer reads
-    # on a genuine timeout is still the gate's own diagnosis and not a bare
-    # cancellation.
+    # 360 minutes with the required check pending throughout.
+    #
+    # 25 against a ceiling of `wait-minutes` + `poll-seconds` + 2 min, which on
+    # the defaults used here (15 min, 30 s) is 17.5. The margin is what keeps the
+    # gate's own diagnosis as what a genuine timeout shows, instead of a bare
+    # cancellation — raising `wait-minutes` or `poll-seconds` here means raising
+    # this too.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1

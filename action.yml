@@ -111,19 +111,33 @@ runs:
           echo "::error::This \`timeout\` does not accept \`--kill-after\` (GNU coreutils does; busybox does not), so the gate's hard ceiling could not escalate past a hung process. Install coreutils on this runner."
           exit 1
         }
-        case "$WAIT_MINUTES_IN" in ''|*[!0-9]*)
-          echo "::error::wait-minutes must be a whole number of minutes, got '$WAIT_MINUTES_IN'."; exit 1 ;;
-        esac
+        # Every numeric input, checked before anything computes with it. Each one
+        # fails differently when it is not a number, and all three failures are
+        # quiet: `wait-minutes` and `poll-seconds` reach an arithmetic expansion
+        # in the ceiling, while `max-rerequests` reaches a `[ ... -lt ]` inside an
+        # `if`, where `set -e` does not look — a non-numeric one there simply
+        # stops the gate from ever re-requesting a review, and the log says
+        # "0 of abc allowed" as if that were a budget.
+        for spec in "wait-minutes:$WAIT_MINUTES_IN" \
+                    "poll-seconds:$POLL_SECONDS" \
+                    "max-rerequests:$MAX_REREQUESTS"; do
+          case "${spec#*:}" in ''|*[!0-9]*)
+            echo "::error::${spec%%:*} must be a whole number, got '${spec#*:}'."; exit 1 ;;
+          esac
+        done
         [ "$WAIT_MINUTES_IN" -gt 0 ] || {
           echo "::error::wait-minutes must be greater than zero, got '$WAIT_MINUTES_IN'."; exit 1; }
-        # Checked for the same reason and one more: poll-seconds is part of the
-        # ceiling below, and an arithmetic expansion evaluates what it is given
-        # rather than reading it as a number.
-        case "$POLL_SECONDS" in ''|*[!0-9]*)
-          echo "::error::poll-seconds must be a whole number of seconds, got '$POLL_SECONDS'."; exit 1 ;;
-        esac
         [ "$POLL_SECONDS" -gt 0 ] || {
           echo "::error::poll-seconds must be greater than zero, got '$POLL_SECONDS'."; exit 1; }
+        # Digits alone are not a number yet: an arithmetic expansion reads a
+        # leading zero as octal, so `08` dies there ("value too great for base")
+        # taking the step with it and printing no `::error::`, and `030` quietly
+        # evaluates as 24 while `sleep` reads the same string as 30 — the ceiling
+        # and the loop it bounds would then be running on different numbers.
+        # These stay exported, so the script downstream gets the same values.
+        WAIT_MINUTES_IN=$(( 10#$WAIT_MINUTES_IN ))
+        POLL_SECONDS=$(( 10#$POLL_SECONDS ))
+        MAX_REREQUESTS=$(( 10#$MAX_REREQUESTS ))
 
         export ACTION_PATH="$GITHUB_ACTION_PATH"
         export WAIT_SECONDS=$(( WAIT_MINUTES_IN * 60 ))
