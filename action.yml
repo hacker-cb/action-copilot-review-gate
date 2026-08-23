@@ -22,10 +22,10 @@ inputs:
     description: >-
       How long to wait for the PR's first genuine Copilot review before failing
       closed. The first review historically lands within ~3.5 min end-to-end.
-      The action wraps its own script in `timeout` at this value plus a
-      two-minute grace, so there is no second number to keep in sync. That
-      ceiling is the STEP's, not the job's — a composite action cannot set
-      `timeout-minutes` — and the README says what it does and does not cover.
+      The action wraps its own script in `timeout` at this value plus one poll
+      interval plus a two-minute grace, so there is no second number to keep in
+      sync. That ceiling is the STEP's, not the job's — a composite action cannot
+      set `timeout-minutes` — and the README says what it does and does not cover.
     required: false
     default: "15"
 
@@ -38,7 +38,10 @@ inputs:
     default: "2"
 
   poll-seconds:
-    description: Seconds between polls of the reviews API.
+    description: >-
+      Seconds between polls of the reviews API. It also lands in the hard ceiling
+      described under `wait-minutes`: the loop tests its deadline before sleeping,
+      so the script runs up to one poll interval past its own window.
     required: false
     default: "30"
 
@@ -100,11 +103,27 @@ runs:
             exit 1
           }
         done
+        # Presence is not enough: busybox ships a `timeout` without `--kill-after`,
+        # and the ceiling below is not a ceiling without it. Probe the flag on a
+        # command that returns at once, so a runner that cannot escalate says so
+        # here rather than hanging past a deadline it could not enforce.
+        timeout --kill-after=1s 1s true >/dev/null 2>&1 || {
+          echo "::error::This \`timeout\` does not accept \`--kill-after\` (GNU coreutils does; busybox does not), so the gate's hard ceiling could not escalate past a hung process. Install coreutils on this runner."
+          exit 1
+        }
         case "$WAIT_MINUTES_IN" in ''|*[!0-9]*)
           echo "::error::wait-minutes must be a whole number of minutes, got '$WAIT_MINUTES_IN'."; exit 1 ;;
         esac
         [ "$WAIT_MINUTES_IN" -gt 0 ] || {
           echo "::error::wait-minutes must be greater than zero, got '$WAIT_MINUTES_IN'."; exit 1; }
+        # Checked for the same reason and one more: poll-seconds is part of the
+        # ceiling below, and an arithmetic expansion evaluates what it is given
+        # rather than reading it as a number.
+        case "$POLL_SECONDS" in ''|*[!0-9]*)
+          echo "::error::poll-seconds must be a whole number of seconds, got '$POLL_SECONDS'."; exit 1 ;;
+        esac
+        [ "$POLL_SECONDS" -gt 0 ] || {
+          echo "::error::poll-seconds must be greater than zero, got '$POLL_SECONDS'."; exit 1; }
 
         export ACTION_PATH="$GITHUB_ACTION_PATH"
         export WAIT_SECONDS=$(( WAIT_MINUTES_IN * 60 ))
@@ -121,7 +140,15 @@ runs:
         # It bounds this STEP, not the job: a composite action cannot set
         # `timeout-minutes`, so it starts when the script does and covers nothing
         # before that. The README says what that leaves to the consumer.
-        hard=$(( WAIT_SECONDS + 120 ))
+        #
+        # The poll interval is IN the sum because the loop is a do-while: it tests
+        # the deadline before sleeping, so the last sleep starts inside the window
+        # and one more poll runs after it. The script therefore ends up to a full
+        # `poll-seconds` past its own window — with `poll-seconds: 300` a
+        # window-plus-two-minutes ceiling would fire first and report a hang where
+        # the script was merely between polls, which is exactly the diagnosis this
+        # ceiling is meant to leave to it.
+        hard=$(( WAIT_SECONDS + POLL_SECONDS + 120 ))
 
         # A ceiling that cannot escalate is not a ceiling. `timeout` sends its
         # signal ONCE and then waits for the child forever, so a process that

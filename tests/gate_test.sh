@@ -64,14 +64,21 @@ status()  { local rc=0; run_gate "$@" || rc=$?; echo "$rc"; }
 # GitHub reads it rather than by eyeballing indentation, so a step rewritten
 # around the `timeout` call is still the thing under test.
 action_step_script() { # action_step_script <path> — write the step's `run:` body
-  python3 - "$ROOT/action.yml" "$1" <<'PY' || { echo "FATAL: tests need python3 with PyYAML to read action.yml — the dependency ci.yml's contract check already uses"; exit 1; }
+  # The step is found by having a `run:`, not by its position: a step added ahead
+  # of it would otherwise be extracted instead, silently testing nothing. python3
+  # prints its own error, so the line below adds what it cannot know — that
+  # PyYAML is the dependency ci.yml's contract check already requires.
+  python3 - "$ROOT/action.yml" "$1" <<'PY' || { echo "FATAL: could not read the step's run: body out of action.yml (needs python3 with PyYAML)"; exit 1; }
 import sys, yaml
 spec = yaml.safe_load(open(sys.argv[1]))
-open(sys.argv[2], 'w').write(spec['runs']['steps'][0]['run'])
+steps = [s for s in spec['runs']['steps'] if 'run' in s]
+if len(steps) != 1:
+    sys.exit(f'action.yml has {len(steps)} run steps; this test assumes exactly one')
+open(sys.argv[2], 'w').write(steps[0]['run'])
 PY
 }
 
-run_step() { # run_step <wait-minutes> — the step's script, against the mock timeout
+run_step() { # run_step <wait-minutes> [poll-seconds] — the step's own script
   local step="$MOCK_DIR/step.sh"   # resolved here: the assignments below are the
                                    # forked process's environment, not this shell's
   PATH="$HERE/mock-bin:$PATH" \
@@ -79,7 +86,7 @@ run_step() { # run_step <wait-minutes> — the step's script, against the mock t
   GITHUB_ACTION_PATH="$ROOT" \
   REPO="acme/widget" PR="42" \
   REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" \
-  WAIT_MINUTES_IN="$1" MAX_REREQUESTS=2 POLL_SECONDS=1 \
+  WAIT_MINUTES_IN="$1" MAX_REREQUESTS=2 POLL_SECONDS="${2:-30}" \
   bash "$step" > "$MOCK_DIR/out" 2>&1
 }
 step_status() { local rc=0; run_step "$@" || rc=$?; echo "$rc"; }
@@ -204,15 +211,18 @@ scenario "the hard ceiling escalates to SIGKILL"
 action_step_script "$MOCK_DIR/step.sh"
 expect "step exit" 0 "$(step_status 15)"
 
-asked="$(cat "$MOCK_DIR/calls.timeout")"
-# `|| true` on both: a flag that is absent is this test's headline result, not a
-# reason to abort the run under `set -e` before it can be reported.
+# `|| true` throughout: a step that never reached `timeout`, or a flag that is
+# absent, is this test's headline result — not a reason to abort the run under
+# `set -e` before anything can be reported.
+asked="$(cat "$MOCK_DIR/calls.timeout" 2>/dev/null || true)"
 signal_flag="$(printf '%s\n' "$asked" | grep -o -- '--signal=[^[:space:]]*'     | head -1 || true)"
 grace_flag="$(printf '%s\n' "$asked"  | grep -o -- '--kill-after=[^[:space:]]*' | head -1 || true)"
 window="$(printf '%s\n' "$asked" | sed -n 's/.*[[:space:]]\([0-9][0-9]*s\)[[:space:]][[:space:]]*bash[[:space:]].*/\1/p')"
 
-# 15 min + the two-minute grace, so the script's own deadline fires first.
-expect "ceiling window"    1020s "$window"
+# 15 min + the 30-second poll interval + the two-minute grace. The poll interval
+# is in there because the loop sleeps AFTER testing its deadline, so the script
+# runs that much past its own window and a ceiling without it would fire first.
+expect "ceiling window"    1050s "$window"
 expect "escalation armed"  armed "$([ -n "$grace_flag" ] && echo armed || echo absent)"
 
 if [ -n "$grace_flag" ]; then
@@ -259,6 +269,24 @@ expect "terminated message" found "$(found 'Terminated; failing closed')"
 printf '137' > "$MOCK_DIR/timeout.rc"
 expect "killed exit"        137   "$(step_status 15)"
 expect "killed message"     found "$(found 'killed with SIGKILL')"
+
+scenario "a timeout that cannot escalate is refused up front"
+# busybox ships a `timeout` without `--kill-after`. Finding that out at the
+# deadline means finding it out from a step that hung; the preflight probes the
+# flag instead, and the gate never starts.
+action_step_script "$MOCK_DIR/step.sh"
+: > "$MOCK_DIR/no-kill-after"
+expect "step exit"     1     "$(step_status 15)"
+expect "diagnosis"     found "$(found 'does not accept')"
+expect "gate not run"  0     "$(count "$MOCK_DIR/calls.timeout")"
+
+scenario "poll-seconds is validated like the wait window"
+# It reaches an arithmetic expansion in the ceiling, which evaluates what it is
+# handed rather than reading it as a number.
+action_step_script "$MOCK_DIR/step.sh"
+expect "non-numeric"  1     "$(step_status 15 abc)"
+expect "diagnosis"    found "$(found 'poll-seconds must be a whole number')"
+expect "zero"         1     "$(step_status 15 0)"
 
 echo
 echo "passed: $pass, failed: $fail"

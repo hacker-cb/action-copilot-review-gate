@@ -7,6 +7,8 @@
 #   timeout.rc     exit status to report (default 0). 124 is what the real thing
 #                  returns when it terminated the command, 137 when it went on to
 #                  kill it; those two are what the step's diagnosis branches on
+#   no-kill-after  present: fail the step's `--kill-after` probe the way a
+#                  busybox `timeout` does, so the preflight can be tested
 #
 # and recording:
 #
@@ -17,6 +19,18 @@
 
 set -euo pipefail
 : "${MOCK_DIR:?MOCK_DIR is required}"
+
+# The step probes `--kill-after` support before it relies on it, over `true` so
+# the probe returns at once. That probe is not the ceiling: it neither takes the
+# configured status nor belongs in the call log, or every assertion below would
+# be reading it instead of the run that matters.
+if [ "${*: -1}" = "true" ]; then
+  if [ -f "$MOCK_DIR/no-kill-after" ]; then
+    echo "timeout: unrecognized option '--kill-after=1s'" >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 printf '%s\n' "$*" >> "$MOCK_DIR/calls.timeout"
 
