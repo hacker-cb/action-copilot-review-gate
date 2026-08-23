@@ -21,6 +21,14 @@ jobs:
   copilot-review-gate:
     name: copilot-review-gate
     runs-on: ubuntu-latest
+    # The action's ceiling bounds its own step and starts when that step does;
+    # this bounds everything before it — a runner stalling on checkout or on
+    # fetching the action, which would otherwise sit here for GitHub's default of
+    # 360 minutes with the required check pending throughout. Well clear of the
+    # default 15-minute window plus its two-minute grace, so what a consumer reads
+    # on a genuine timeout is still the gate's own diagnosis and not a bare
+    # cancellation.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./
