@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+#
+# A stand-in for the `gh` CLI, driven by files in $MOCK_DIR:
+#
+#   reviews.<n>.json  the reviews array returned by the n-th poll; polls past the
+#                     highest n reuse the last file, so a scenario can settle
+#   reviews.<n>.rc    optional exit status for that poll (default 0) — a non-zero
+#                     one simulates an unreachable API
+#   edit.<n>.rc       optional exit status for the n-th `pr edit` (default 0)
+#   state             what `gh api repos/.../pulls/N` reports (default "open")
+#
+# and recording what it was asked to do:
+#
+#   calls.reviews     one line per reviews poll
+#   calls.edit        one line per re-request attempt, with its exit status
+#
+# Written with explicit `if` rather than `cond && action`: under `set -e` such a
+# list exits non-zero when the condition is false, which kills the mock silently
+# and reads downstream as "the API returned nothing".
+
+set -euo pipefail
+: "${MOCK_DIR:?MOCK_DIR is required}"
+
+# Lines in a file that may not exist yet. Never `wc -l < "$f"`: the shell applies
+# the input redirection BEFORE any `2>/dev/null` on the same command, so a missing
+# file prints its own error and, under `set -e`, takes the mock down with it.
+count() {
+  if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi
+}
+
+# The n-th file of a series, falling back to the highest one below n so a
+# scenario can describe "from now on" with a single file.
+nth() {
+  local prefix="$1" suffix="$2" n="$3" i
+  for (( i = n; i >= 1; i-- )); do
+    if [ -f "$MOCK_DIR/$prefix.$i.$suffix" ]; then
+      echo "$MOCK_DIR/$prefix.$i.$suffix"
+      return 0
+    fi
+  done
+  return 1
+}
+
+rc_for() { # rc_for <prefix> <n> — the configured exit status, or 0
+  local file
+  if file="$(nth "$1" rc "$2")"; then cat "$file"; else echo 0; fi
+}
+
+case "${1:-}" in
+  api)
+    target=""
+    for arg in "$@"; do
+      case "$arg" in repos/*) target="$arg"; break ;; esac
+    done
+    case "$target" in
+      */reviews*)
+        n=$(( $(count "$MOCK_DIR/calls.reviews") + 1 ))
+        echo "poll $n" >> "$MOCK_DIR/calls.reviews"
+        rc="$(rc_for reviews "$n")"
+        if [ "$rc" != 0 ]; then
+          echo "gh: mock API failure (HTTP 502)" >&2
+          exit "$rc"
+        fi
+        if body="$(nth reviews json "$n")"; then cat "$body"; else echo '[]'; fi
+        ;;
+      *)
+        # `gh api repos/<owner>/<repo>/pulls/<n> --jq .state`
+        if [ -f "$MOCK_DIR/state" ]; then cat "$MOCK_DIR/state"; else echo open; fi
+        ;;
+    esac
+    ;;
+  pr)
+    # `gh pr edit <n> --repo <r> --add-reviewer @copilot`
+    n=$(( $(count "$MOCK_DIR/calls.edit") + 1 ))
+    rc="$(rc_for edit "$n")"
+    echo "edit $n rc=$rc" >> "$MOCK_DIR/calls.edit"
+    if [ "$rc" != 0 ]; then
+      echo "gh: mock re-request failure (HTTP 403)" >&2
+      exit "$rc"
+    fi
+    ;;
+  *)
+    echo "mock gh: unexpected invocation: $*" >&2
+    exit 64
+    ;;
+esac

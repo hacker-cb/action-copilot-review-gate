@@ -1,0 +1,5 @@
+{
+  "user": { "login": "copilot-workspace[bot]", "type": "Bot" },
+  "state": "COMMENTED",
+  "body": "## Pull request overview\n\nA sibling app in the Copilot family posting a body that carries the marker. It is a Bot, and its login starts with `copilot` — a prefix test would let it clear the gate. The allowlist must not."
+}

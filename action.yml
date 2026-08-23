@@ -1,0 +1,125 @@
+name: Copilot review gate
+description: >-
+  Block a merge until GitHub Copilot has genuinely reviewed the pull request.
+  Publishes a stable status check you can mark required, and tells a real review
+  apart from Copilot's "could not review" reply.
+author: hacker-cb
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  github-token:
+    description: >-
+      Token used to read the PR's reviews and to re-request a review. The default
+      job token is enough; it needs `pull-requests: write`, which buys exactly one
+      operation — adding Copilot back as a reviewer.
+    required: false
+    default: ${{ github.token }}
+
+  wait-minutes:
+    description: >-
+      How long to wait for the PR's first genuine Copilot review before failing
+      closed. The first review historically lands within ~3.5 min end-to-end.
+      The job's hard ceiling is derived from this value, so there is no second
+      timeout to keep in sync.
+    required: false
+    default: "15"
+
+  max-rerequests:
+    description: >-
+      How many times to ask Copilot again after it answers without reviewing.
+      Bounded on purpose: a backend that is down stays down, and the wait window
+      is the real limit anyway. Only successful requests count against it.
+    required: false
+    default: "2"
+
+  poll-seconds:
+    description: Seconds between polls of the reviews API.
+    required: false
+    default: "30"
+
+  reviewers:
+    description: >-
+      Logins that count as Copilot, one per line. An ALLOWLIST, never a
+      `copilot` prefix: several apps in the Copilot family carry a login with
+      that prefix, and for a merge gate one false match costs a merge. Two
+      spellings because the bot answers to a different one per API surface.
+      The account must also be of type `Bot`, which no input can relax.
+    required: false
+    default: |
+      copilot-pull-request-reviewer[bot]
+      copilot
+
+  review-markers:
+    description: >-
+      Body substrings that mark a review as genuine, one per line; matching any
+      one is enough, case-insensitively. Copilot changed its review format in
+      August 2026 — the old one opens with a `## Pull request overview` heading,
+      the new one moves that text into a `<details><summary>`, and its later
+      reviews on the same PR drop the overview section entirely, keeping only a
+      `Review details` block. Both defaults below are needed to cover that, and
+      neither appears in any refusal body. Add an entry rather than replacing the
+      list when a new format appears.
+    required: false
+    default: |
+      pull request overview
+      <summary>review details
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        IS_DRAFT: ${{ github.event.pull_request.draft }}
+        AUTHOR: ${{ github.event.pull_request.user.login }}
+        AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+        WAIT_MINUTES_IN: ${{ inputs.wait-minutes }}
+        MAX_REREQUESTS: ${{ inputs.max-rerequests }}
+        POLL_SECONDS: ${{ inputs.poll-seconds }}
+        REVIEWERS: ${{ inputs.reviewers }}
+        MARKERS: ${{ inputs.review-markers }}
+      # Every value reaches the script through `env:` above — never `${{ }}`
+      # interpolated into this body, which would be a script-injection surface.
+      run: |
+        set -euo pipefail
+
+        if [ -z "${PR:-}" ]; then
+          echo "::error::No pull request in the event payload. This action must run on a \`pull_request\` trigger."
+          exit 1
+        fi
+        for tool in gh jq timeout; do
+          command -v "$tool" >/dev/null 2>&1 || {
+            echo "::error::\`$tool\` is not on PATH. GitHub-hosted runners ship all three; a self-hosted runner needs gh, jq and coreutils."
+            exit 1
+          }
+        done
+        case "$WAIT_MINUTES_IN" in ''|*[!0-9]*)
+          echo "::error::wait-minutes must be a whole number of minutes, got '$WAIT_MINUTES_IN'."; exit 1 ;;
+        esac
+        [ "$WAIT_MINUTES_IN" -gt 0 ] || {
+          echo "::error::wait-minutes must be greater than zero, got '$WAIT_MINUTES_IN'."; exit 1; }
+
+        export ACTION_PATH="$GITHUB_ACTION_PATH"
+        export WAIT_SECONDS=$(( WAIT_MINUTES_IN * 60 ))
+        export WAIT_LABEL="${WAIT_MINUTES_IN} min"
+
+        # The hard ceiling is COMPUTED from the wait window, not configured next
+        # to it. GitHub cannot derive one from the other — `timeout-minutes` does
+        # not read `env` — so a job-level timeout would be a second number every
+        # consumer had to keep in sync with this one, in a different file. Here
+        # the two cannot drift: the ceiling is always the window plus a two-minute
+        # grace, leaving the script's own deadline to fire first and print its
+        # fail-closed diagnosis before anything kills it.
+        hard=$(( WAIT_SECONDS + 120 ))
+
+        status=0
+        timeout --signal=TERM "${hard}s" bash "$GITHUB_ACTION_PATH/scripts/gate.sh" || status=$?
+        if [ "$status" = 124 ]; then
+          echo "::error::The gate ran past its hard ceiling of ${hard}s while its own window is ${WAIT_MINUTES_IN} min — something hung. Failing closed."
+        fi
+        exit "$status"

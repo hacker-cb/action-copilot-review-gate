@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Lint the workflows
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/latest/download/actionlint_$(
+              curl -fsSL https://api.github.com/repos/rhysd/actionlint/releases/latest | jq -r .tag_name | tr -d v
+            )_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+      - name: Lint the shell
+        run: |
+          shellcheck --severity=style scripts/gate.sh tests/*.sh tests/mock-bin/gh
+
+      - name: Check action.yml parses and keeps its contract
+        run: |
+          # The defaults are not decoration: tests/classify_test.sh reads the
+          # reviewers and markers straight out of this file, so that a default
+          # edited here without a matching fixture fails the suite rather than
+          # shipping.
+          python3 - <<'PY'
+          import sys, yaml
+          spec = yaml.safe_load(open('action.yml'))
+          assert spec['runs']['using'] == 'composite', 'must stay a composite action'
+          inputs = spec['inputs']
+          for name in ('github-token', 'wait-minutes', 'max-rerequests',
+                       'poll-seconds', 'reviewers', 'review-markers'):
+              assert name in inputs, f'input {name} disappeared'
+          markers = [m.strip() for m in inputs['review-markers']['default'].splitlines() if m.strip()]
+          assert len(markers) >= 2, 'both review formats must stay covered'
+          print('action.yml OK —', len(markers), 'markers,',
+                len([r for r in inputs['reviewers']['default'].splitlines() if r.strip()]), 'reviewers')
+          PY
+
+      - name: Classification tests
+        run: bash tests/classify_test.sh
+
+      - name: Gate tests
+        run: bash tests/gate_test.sh

@@ -1,0 +1,5 @@
+{
+  "user": null,
+  "state": "COMMENTED",
+  "body": "## Pull request overview\n\nLeft by an account that has since been deleted, so the API returns `\"user\": null`. Reached without `?` and `// \"\"` this row aborts the whole jq program — which reads as \"no review yet\"."
+}

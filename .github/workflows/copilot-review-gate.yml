@@ -1,0 +1,26 @@
+# This repository gates itself with the action it ships, from the PR's own head —
+# note the `./` below rather than a released tag. A change that breaks the gate
+# therefore cannot pass its own gate, which is the one test no fixture can stand
+# in for: the fixtures say what a Copilot review looked like when they were
+# captured, and this says what one looks like today.
+name: Copilot review gate
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read        # needed only to check out the action from this PR
+  pull-requests: write  # buys exactly one operation: re-requesting the review
+
+concurrency:
+  group: copilot-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  copilot-review-gate:
+    name: copilot-review-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./

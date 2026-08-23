@@ -1,0 +1,8 @@
+{
+  "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+  },
+  "state": "COMMENTED",
+  "body": "Copilot encountered an error and was unable to review this pull request. You can try again by re-requesting a review."
+}

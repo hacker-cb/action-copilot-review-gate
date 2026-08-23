@@ -1,0 +1,5 @@
+{
+  "user": { "login": "hacker-cb", "type": "User" },
+  "state": "APPROVED",
+  "body": "## Pull request overview\n\nA human quoting the marker verbatim, e.g. while discussing this very gate. Must never count as Copilot's review."
+}
