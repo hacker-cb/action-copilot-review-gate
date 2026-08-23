@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# End-to-end tests for scripts/gate.sh, driven by the mock `gh` in tests/mock-bin.
+# End-to-end tests for scripts/gate.sh, driven by the mock `gh` in tests/mock-bin,
+# plus the hard ceiling around it — which lives in action.yml, so the last two
+# scenarios run that step's own script against a mock `timeout`.
 #
 # What each scenario is really asserting is the DIRECTION the gate fails in: an
 # unreviewed PR must never pass, and a genuine review must never be held. The
@@ -56,6 +58,32 @@ count()   { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 edits()   { count "$MOCK_DIR/calls.edit"; }
 polls()   { count "$MOCK_DIR/calls.reviews"; }
 status()  { local rc=0; run_gate "$@" || rc=$?; echo "$rc"; }
+
+# The hard ceiling lives in action.yml, not in gate.sh, so the scenarios at the
+# bottom drive the composite step's own script — read out of the file the way
+# GitHub reads it rather than by eyeballing indentation, so a step rewritten
+# around the `timeout` call is still the thing under test.
+action_step_script() { # action_step_script <path> — write the step's `run:` body
+  python3 - "$ROOT/action.yml" "$1" <<'PY' || { echo "FATAL: tests need python3 with PyYAML to read action.yml — the dependency ci.yml's contract check already uses"; exit 1; }
+import sys, yaml
+spec = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], 'w').write(spec['runs']['steps'][0]['run'])
+PY
+}
+
+run_step() { # run_step <wait-minutes> — the step's script, against the mock timeout
+  local step="$MOCK_DIR/step.sh"   # resolved here: the assignments below are the
+                                   # forked process's environment, not this shell's
+  PATH="$HERE/mock-bin:$PATH" \
+  MOCK_DIR="$MOCK_DIR" \
+  GITHUB_ACTION_PATH="$ROOT" \
+  REPO="acme/widget" PR="42" \
+  REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" \
+  WAIT_MINUTES_IN="$1" MAX_REREQUESTS=2 POLL_SECONDS=1 \
+  bash "$step" > "$MOCK_DIR/out" 2>&1
+}
+step_status() { local rc=0; run_step "$@" || rc=$?; echo "$rc"; }
+found()       { if grep -q "$1" "$MOCK_DIR/out"; then echo found; else echo lost; fi; }
 
 # ---------------------------------------------------------------- happy paths
 
@@ -164,6 +192,73 @@ scenario "max-rerequests is honoured"
 arr 1 notreview-backend-error
 expect "exit"        1 "$(MAX_REREQUESTS=1 status 4 1)"
 expect "re-requests" 1 "$(edits)"
+
+# ------------------------------------------------------------- the ceiling
+
+scenario "the hard ceiling escalates to SIGKILL"
+# Two halves, because with the escalation missing either one alone still passes:
+# what the step ASKS `timeout` for, and what that request then does to a child
+# that ignores TERM. Without `--kill-after` the second half is the whole bug —
+# `timeout` signals once and then waits for the child indefinitely, so a ceiling
+# of 17 minutes ends whenever the hung process feels like ending.
+action_step_script "$MOCK_DIR/step.sh"
+expect "step exit" 0 "$(step_status 15)"
+
+asked="$(cat "$MOCK_DIR/calls.timeout")"
+# `|| true` on both: a flag that is absent is this test's headline result, not a
+# reason to abort the run under `set -e` before it can be reported.
+signal_flag="$(printf '%s\n' "$asked" | grep -o -- '--signal=[^[:space:]]*'     | head -1 || true)"
+grace_flag="$(printf '%s\n' "$asked"  | grep -o -- '--kill-after=[^[:space:]]*' | head -1 || true)"
+window="$(printf '%s\n' "$asked" | sed -n 's/.*[[:space:]]\([0-9][0-9]*s\)[[:space:]][[:space:]]*bash[[:space:]].*/\1/p')"
+
+# 15 min + the two-minute grace, so the script's own deadline fires first.
+expect "ceiling window"    1020s "$window"
+expect "escalation armed"  armed "$([ -n "$grace_flag" ] && echo armed || echo absent)"
+
+if [ -n "$grace_flag" ]; then
+  grace_seconds="${grace_flag##*=}"; grace_seconds="${grace_seconds%s}"
+  # A child that ignores TERM. Bash passes an IGNORED disposition on to what it
+  # starts, so the `sleep` ignores it too — which is why the group signal alone
+  # does not end this, and why it is the shape a stuck `gh` would take.
+  cat > "$MOCK_DIR/ignores-term.sh" <<'SH'
+trap '' TERM
+sleep 60 &
+wait
+SH
+  # The real `timeout`, the flags the step asked for, and a window shortened so a
+  # test need not sit out 17 minutes of them.
+  started=$SECONDS
+  rc=0
+  # Through an inner shell, whose stderr is dropped: a shell announces a
+  # signal-killed foreground child itself ("Killed: 9"), and here that line is
+  # the scenario PASSING — not something a reader should have to scroll past.
+  # `exit $?` is what keeps that shell around to absorb the message instead of
+  # exec'ing itself away and leaving this one to print it.
+  # shellcheck disable=SC2016  # `$@` and `$?` are for the inner shell, by design
+  bash -c 'timeout "$@"; exit $?' _ \
+    "$signal_flag" "$grace_flag" 1s bash "$MOCK_DIR/ignores-term.sh" 2>/dev/null || rc=$?
+  elapsed=$(( SECONDS - started ))
+  # 137 is 128 + SIGKILL: killed. 124 would mean terminated and then waited out —
+  # the ceiling reporting a timeout only once the child was done anyway.
+  expect "killed, not waited out" 137 "$rc"
+  expect "killed inside the grace" within \
+    "$([ "$elapsed" -le $(( grace_seconds + 5 )) ] && echo within || echo "${elapsed}s")"
+else
+  expect "killed, not waited out"  137    "not run — nothing to escalate with"
+  expect "killed inside the grace" within "not run — nothing to escalate with"
+fi
+
+scenario "the ceiling says which way it ended"
+# The step branches on the two statuses `timeout` reports, and 137 arrives only
+# once the escalation exists — the branch that used to catch 124 alone would
+# have exited silently on it.
+action_step_script "$MOCK_DIR/step.sh"
+printf '124' > "$MOCK_DIR/timeout.rc"
+expect "terminated exit"    124   "$(step_status 15)"
+expect "terminated message" found "$(found 'Terminated; failing closed')"
+printf '137' > "$MOCK_DIR/timeout.rc"
+expect "killed exit"        137   "$(step_status 15)"
+expect "killed message"     found "$(found 'killed with SIGKILL')"
 
 echo
 echo "passed: $pass, failed: $fail"

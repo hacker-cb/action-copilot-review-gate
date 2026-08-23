@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# A stand-in for `timeout(1)`, so a test can read the ceiling action.yml asks for
+# without sitting one out — the real window is 17 minutes. Driven by files in
+# $MOCK_DIR:
+#
+#   timeout.rc     exit status to report (default 0). 124 is what the real thing
+#                  returns when it terminated the command, 137 when it went on to
+#                  kill it; those two are what the step's diagnosis branches on
+#
+# and recording:
+#
+#   calls.timeout  one line per invocation, holding the whole argument vector
+#
+# The command itself is NEVER run: this mock exists to inspect the request, and
+# the follow-up half of the test runs the real `timeout` with the same flags.
+
+set -euo pipefail
+: "${MOCK_DIR:?MOCK_DIR is required}"
+
+printf '%s\n' "$*" >> "$MOCK_DIR/calls.timeout"
+
+if [ -f "$MOCK_DIR/timeout.rc" ]; then
+  exit "$(cat "$MOCK_DIR/timeout.rc")"
+fi
+exit 0
