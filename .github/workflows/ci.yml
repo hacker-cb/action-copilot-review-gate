@@ -32,7 +32,7 @@ jobs:
 
       - name: Lint the shell
         run: |
-          shellcheck --severity=style scripts/gate.sh tests/*.sh tests/mock-bin/gh
+          shellcheck --severity=style scripts/gate.sh tests/*.sh tests/mock-bin/*
 
       - name: Check action.yml parses and keeps its contract
         run: |

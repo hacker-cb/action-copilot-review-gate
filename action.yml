@@ -22,8 +22,10 @@ inputs:
     description: >-
       How long to wait for the PR's first genuine Copilot review before failing
       closed. The first review historically lands within ~3.5 min end-to-end.
-      The job's hard ceiling is derived from this value, so there is no second
-      timeout to keep in sync.
+      The action wraps its own script in `timeout` at this value plus one poll
+      interval plus a two-minute grace, so there is no second number to keep in
+      sync. That ceiling is the STEP's, not the job's — a composite action cannot
+      set `timeout-minutes` — and the README says what it does and does not cover.
     required: false
     default: "15"
 
@@ -36,7 +38,10 @@ inputs:
     default: "2"
 
   poll-seconds:
-    description: Seconds between polls of the reviews API.
+    description: >-
+      Seconds between polls of the reviews API. It also lands in the hard ceiling
+      described under `wait-minutes`: the loop tests its deadline before sleeping,
+      so the script runs up to one poll interval past its own window.
     required: false
     default: "30"
 
@@ -98,11 +103,43 @@ runs:
             exit 1
           }
         done
-        case "$WAIT_MINUTES_IN" in ''|*[!0-9]*)
-          echo "::error::wait-minutes must be a whole number of minutes, got '$WAIT_MINUTES_IN'."; exit 1 ;;
-        esac
+        # Presence is not enough: busybox ships a `timeout` that has neither
+        # `--kill-after` nor GNU's duration suffixes, and the ceiling below is not
+        # a ceiling without both. Probe the whole invocation on a command that
+        # returns at once, so a runner that cannot enforce the ceiling says so here
+        # rather than hanging past a deadline it never had. The message names the
+        # probe rather than one flag, because either half can be what failed.
+        timeout --kill-after=1s 1s true >/dev/null 2>&1 || {
+          echo "::error::This \`timeout\` does not support what the gate's hard ceiling needs: \`timeout --kill-after=1s 1s true\` failed. GNU coreutils accepts it; busybox's \`timeout\` has neither the flag nor the \`1s\` suffix. Install coreutils on this runner."
+          exit 1
+        }
+        # Every numeric input, checked before anything computes with it. Each one
+        # fails differently when it is not a number, and all three failures are
+        # quiet: `wait-minutes` and `poll-seconds` reach an arithmetic expansion
+        # in the ceiling, while `max-rerequests` reaches a `[ ... -lt ]` inside an
+        # `if`, where `set -e` does not look — a non-numeric one there simply
+        # stops the gate from ever re-requesting a review, and the log says
+        # "0 of abc allowed" as if that were a budget.
+        for spec in "wait-minutes:$WAIT_MINUTES_IN" \
+                    "poll-seconds:$POLL_SECONDS" \
+                    "max-rerequests:$MAX_REREQUESTS"; do
+          case "${spec#*:}" in ''|*[!0-9]*)
+            echo "::error::${spec%%:*} must be a whole number, got '${spec#*:}'."; exit 1 ;;
+          esac
+        done
         [ "$WAIT_MINUTES_IN" -gt 0 ] || {
           echo "::error::wait-minutes must be greater than zero, got '$WAIT_MINUTES_IN'."; exit 1; }
+        [ "$POLL_SECONDS" -gt 0 ] || {
+          echo "::error::poll-seconds must be greater than zero, got '$POLL_SECONDS'."; exit 1; }
+        # Digits alone are not a number yet: an arithmetic expansion reads a
+        # leading zero as octal, so `08` dies there ("value too great for base")
+        # taking the step with it and printing no `::error::`, and `030` quietly
+        # evaluates as 24 while `sleep` reads the same string as 30 — the ceiling
+        # and the loop it bounds would then be running on different numbers.
+        # These stay exported, so the script downstream gets the same values.
+        WAIT_MINUTES_IN=$(( 10#$WAIT_MINUTES_IN ))
+        POLL_SECONDS=$(( 10#$POLL_SECONDS ))
+        MAX_REREQUESTS=$(( 10#$MAX_REREQUESTS ))
 
         export ACTION_PATH="$GITHUB_ACTION_PATH"
         export WAIT_SECONDS=$(( WAIT_MINUTES_IN * 60 ))
@@ -110,16 +147,54 @@ runs:
 
         # The hard ceiling is COMPUTED from the wait window, not configured next
         # to it. GitHub cannot derive one from the other — `timeout-minutes` does
-        # not read `env` — so a job-level timeout would be a second number every
-        # consumer had to keep in sync with this one, in a different file. Here
-        # the two cannot drift: the ceiling is always the window plus a two-minute
+        # not read `env` — so a second number here would be one every consumer had
+        # to keep in sync with this one, in a different file. Deriving it means the
+        # two cannot drift: the ceiling is always the window plus a two-minute
         # grace, leaving the script's own deadline to fire first and print its
         # fail-closed diagnosis before anything kills it.
-        hard=$(( WAIT_SECONDS + 120 ))
+        #
+        # It bounds this STEP, not the job: a composite action cannot set
+        # `timeout-minutes`, so it starts when the script does and covers nothing
+        # before that. The README says what that leaves to the consumer.
+        #
+        # The poll interval is IN the sum because the loop is a do-while: it tests
+        # the deadline before sleeping, so the last sleep starts inside the window
+        # and one more poll runs after it. The script therefore ends up to a full
+        # `poll-seconds` past its own window — with `poll-seconds: 300` a
+        # window-plus-two-minutes ceiling would fire first and report a hang where
+        # the script was merely between polls, which is exactly the diagnosis this
+        # ceiling is meant to leave to it.
+        hard=$(( WAIT_SECONDS + POLL_SECONDS + 120 ))
+
+        # A ceiling that cannot escalate is not a ceiling. `timeout` sends its
+        # signal ONCE and then waits for the child forever, so a process that
+        # ignores TERM outlives the deadline it was given and the step hangs there
+        # — the very failure this ceiling exists to end. `--kill-after` arms the
+        # SIGKILL that actually ends it.
+        #
+        # Ten seconds: gate.sh installs no signal handler and its only cleanup is
+        # three temp files, while `gh` and `sleep` die on TERM at once. A child
+        # stuck in an uninterruptible wait outlives any grace — SIGKILL does not
+        # reach it either — so a longer one buys nothing.
+        #
+        # No `--foreground`: without it `timeout` puts the script in its own
+        # process group and signals the GROUP, which is what reaches a hung `gh`.
+        # With it, only the script would be signalled and the child holding the
+        # step open would survive both the TERM and the KILL.
+        kill_grace=10
 
         status=0
-        timeout --signal=TERM "${hard}s" bash "$GITHUB_ACTION_PATH/scripts/gate.sh" || status=$?
-        if [ "$status" = 124 ]; then
-          echo "::error::The gate ran past its hard ceiling of ${hard}s while its own window is ${WAIT_MINUTES_IN} min — something hung. Failing closed."
-        fi
+        timeout --signal=TERM --kill-after="${kill_grace}s" "${hard}s" \
+          bash "$GITHUB_ACTION_PATH/scripts/gate.sh" || status=$?
+        case "$status" in
+          124)
+            echo "::error::The gate ran past its hard ceiling of ${hard}s while its own window is ${WAIT_MINUTES_IN} min — something hung. Terminated; failing closed."
+            ;;
+          137)
+            # 128 + SIGKILL. Normally the ceiling escalating, since nothing else
+            # here sends a KILL — but a runner out-of-memory kill lands the same
+            # status, so the message names both rather than asserting one.
+            echo "::error::The gate was killed with SIGKILL: either it ignored the termination signal at its hard ceiling of ${hard}s and was killed ${kill_grace}s later, or the runner ran out of memory. Failing closed."
+            ;;
+        esac
         exit "$status"
