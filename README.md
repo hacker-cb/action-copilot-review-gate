@@ -281,9 +281,9 @@ broke. A fixture's name declares its verdict — `review-*`, `unable-*` (the set
 "nothing to review"), `notreview-*` (unrecognised), `ignored-*` (not Copilot) — and
 `tests/classify_test.sh` reads the marker and reviewer defaults out of `action.yml`,
 so editing a default without a fixture to match fails the suite. The
-last two scenarios of `tests/gate_test.sh` cover the hard ceiling, which lives in
-`action.yml` rather than in the script — they read that step's `run:` body out of the
-file (python3 with PyYAML, the dependency CI's contract check already uses) and run
+closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's own
+input validation, which live in `action.yml` rather than in the script — they read
+that step's `run:` body out of the file (python3 with PyYAML, the dependency CI's contract check already uses) and run
 it against a mock `timeout`.
 
 The repository gates itself with the action from the PR's own head (`uses: ./`), which
