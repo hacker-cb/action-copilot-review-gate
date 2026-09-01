@@ -117,11 +117,13 @@ a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
 answered it had **nothing reviewable in** *at the current head* — the one of the four
 you can switch off.
 
-Every outcome of the gate itself writes a one-line verdict to the job summary, so a
-gate that passed *without* a review says so on the run page rather than only in a log
-someone has to scroll. The step's preflight — no pull request in the event, a missing
-`gh`/`jq`/`timeout`, a non-numeric input, the hard ceiling firing — runs before that
-script and reports in the log alone.
+Every verdict the gate reaches writes a one-line summary line, so a gate that passed
+*without* a review says so on the run page rather than only in a log someone has to
+scroll. Two things that are not verdicts report in the log alone: the step's preflight
+— no pull request in the event, a missing `gh`/`jq`/`timeout`, a non-numeric input,
+the hard ceiling firing — which runs before the gate script at all, and that script's
+own required-variable guards, which fire only when the plumbing between the two is
+broken.
 
 The `pull-requests: write` scope buys exactly one operation — adding Copilot back as a
 reviewer after it answered without reviewing. The job never checks out your code,
@@ -294,15 +296,22 @@ suite exists because a hand-written fixture would have kept passing while produc
 broke. A fixture's name declares its verdict — `review-*`, `unable-*` (the settled
 "nothing to review"), `notreview-*` (unrecognised), `ignored-*` (not Copilot) — and
 `tests/classify_test.sh` reads the marker and reviewer defaults out of `action.yml`,
-so editing a default without a fixture to match fails the suite. One envelope field
-is not captured: the settled fixture carries a synthetic `commit_id`, because the
-class is pinned to the head commit and the capture did not keep the real one; both
-suites take their idea of "current head" from that field rather than repeating it.
-The
-closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's own
-input validation, which live in `action.yml` rather than in the script — they read
-that step's `run:` body out of the file (python3 with PyYAML, the dependency CI's contract check already uses) and run
-it against a mock `timeout`.
+so editing a default without a fixture to match fails the suite.
+
+One envelope field is not captured. The settled class is pinned to the head commit,
+and the capture did not keep the `commit_id` it came with, so that fixture carries a
+synthetic one and both suites take their idea of "current head" from that field
+rather than repeating it. What the pinning depends on — that a review's `commit_id`
+is the branch commit it was left on, not a merge ref — is not something the fixture
+can show; it was checked against this repository's own pull requests, where
+[#1](https://github.com/hacker-cb/action-copilot-review-gate/pull/1) carries one
+Copilot review on an earlier commit and a second on the head, which is exactly the
+case the pinning exists for.
+
+The closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's
+own input validation, which live in `action.yml` rather than in the script — they
+read that step's `run:` body out of the file (python3 with PyYAML, the dependency
+CI's contract check already uses) and run it against a mock `timeout`.
 
 The repository gates itself with the action from the PR's own head (`uses: ./`), which
 is the one check no fixture can stand in for: fixtures say what a review looked like

@@ -46,7 +46,13 @@ set -euo pipefail
 # behaviour this gate had before it existed — so `:?` would refuse a
 # configuration that is deliberately available.
 : "${UNABLE_MARKERS=}"
-: "${UNABLE_POLICY:=pass}"
+# `=` and not `:=` — the default is for an UNSET variable only. A caller wiring
+# this to `${{ vars.SOMETHING }}` that does not exist passes an empty string, and
+# `:=` would rewrite that to `pass` before the check below ever saw it: a
+# misconfigured repo would then silently take the fail-OPEN side of the one input
+# whose whole purpose is choosing a side. Empty now reaches the check and stops
+# the run, which is what every numeric input in action.yml already does with it.
+: "${UNABLE_POLICY=pass}"
 # The commit a settled "nothing to review" has to be about to settle anything.
 # Defaulted, not required — and empty means nothing is ever settled, so a value
 # lost in the plumbing keeps the gate waiting rather than opening it.
@@ -58,9 +64,9 @@ set -euo pipefail
 # afterwards and wants legible at a glance. Absent outside Actions (the tests run
 # this script directly), and an unwritable path is not worth failing a gate over.
 #
-# Defined above the first thing that can exit, so every outcome of THIS script
-# reaches it. The step's own preflight in action.yml runs before this file and
-# writes none — see the README.
+# Defined above the first VERDICT this script can reach. What is above it is not
+# one: the `:?` guards are broken plumbing, and the step's preflight in action.yml
+# runs before this file at all. Both report in the log alone — see the README.
 summarize() {
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
   printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
@@ -193,7 +199,14 @@ while :; do
   # Said separately, because it reads as a contradiction otherwise: the gate has
   # a "nothing to review" answer in hand and is still waiting.
   if [ "${stale:-0}" -gt "${stale_reported:-0}" ]; then
-    echo "Copilot's \"nothing to review\" answer on PR #$PR is not for the current head (${HEAD_SHA:-unknown}) — it settles an older commit, so the gate keeps waiting."
+    if [ -n "$HEAD_SHA" ]; then
+      echo "Copilot's \"nothing to review\" answer on PR #$PR is not for the current head ($HEAD_SHA) — it settles an older commit, so the gate keeps waiting."
+    else
+      # No comparison happened at all, and blaming Copilot for that would send
+      # the reader looking in the wrong place: what is missing is the head this
+      # gate was supposed to be handed.
+      echo "::warning::Copilot answered \"nothing to review\" on PR #$PR, but no head commit reached the gate, so nothing can be settled against it. Check that \`github.event.pull_request.head.sha\` is present — this event may not be a \`pull_request\`."
+    fi
     stale_reported=$stale
   fi
 
@@ -248,8 +261,12 @@ if [ -s "$seen_bodies" ]; then
   # wording no marker covers lands here too, and `unable-to-review-markers` is
   # then the list wanting the new entry.
   echo "Copilot posted the following, none of which is a review:"
+  # The marker on the stale ones says only that they were not counted. WHY they
+  # were not — an older commit, or no head at all — was said once above, in a
+  # branch that knows which of the two it was; repeating a guess here is how a
+  # missing input ends up reading as Copilot's fault.
   sed -e 's/^not-a-review[[:space:]]*/  /' \
-      -e 's/^stale-unable-to-review[[:space:]]*/  (settles an older commit) /' "$seen_bodies"
+      -e 's/^stale-unable-to-review[[:space:]]*/  (a "nothing to review" answer, not counted) /' "$seen_bodies"
   echo "Markers a body is matched against (any one is enough):"
   printf '%s\n' "$MARKERS" | sed '/^[[:space:]]*$/d; s/^/  /'
   # Only when there is a list to print: empty is the documented way to turn the

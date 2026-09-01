@@ -57,9 +57,9 @@ run_gate() { # run_gate <wait-seconds> <poll-seconds> [env assignments...]
   WAIT_SECONDS="$wait" WAIT_LABEL="${wait}s" POLL_SECONDS="$poll" \
   MAX_REREQUESTS="${MAX_REREQUESTS:-2}" \
   UNABLE_MARKERS="${UNABLE_MARKERS-$UNABLE_MARKERS_DEFAULT}" \
-  UNABLE_POLICY="${UNABLE_POLICY:-pass}" \
+  UNABLE_POLICY="${UNABLE_POLICY-pass}" \
   HEAD_SHA="${HEAD_SHA-$HEAD_SHA_DEFAULT}" \
-  GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+  GITHUB_STEP_SUMMARY="${SUMMARY_FILE-}" \
   "$@" \
   bash "$ROOT/scripts/gate.sh" > "$MOCK_DIR/out" 2>&1
 }
@@ -236,10 +236,13 @@ expect "exit"   0     "$(HEAD_SHA=1234567812345678123456781234567812345678 statu
 expect "reason" found "$(found 'has reviewed')"
 
 scenario "no head at all settles nothing either"
-# HEAD_SHA lost in the plumbing must keep the gate waiting, never open it.
+# HEAD_SHA lost in the plumbing must keep the gate waiting, never open it — and
+# say that it was the plumbing, not Copilot: no comparison happened at all.
 arr 1 unable-no-files
-expect "exit"        1 "$(HEAD_SHA='' status 3 1)"
-expect "re-requests" 1 "$(edits)"
+expect "exit"        1     "$(HEAD_SHA='' status 3 1)"
+expect "re-requests" 1     "$(edits)"
+expect "blames the input" found "$(found 'no head commit reached the gate')"
+expect "not Copilot"      lost  "$(found 'settles an older commit')"
 
 scenario "an empty marker list restores the old behaviour"
 # The documented way back to the two-class gate: the same body becomes an
@@ -256,20 +259,33 @@ expect "exit"      1     "$(UNABLE_POLICY=maybe status 3 1)"
 expect "polls"     0     "$(polls)"
 expect "diagnosis" found "$(found 'unable-to-review must be')"
 
+scenario "an explicitly empty policy is refused too"
+# What `${{ vars.SOMETHING }}` hands over when SOMETHING does not exist. Defaulted
+# with `:=` it would have become `pass` — the fail-OPEN side — without a word.
+arr 1 unable-no-files
+expect "exit"      1     "$(UNABLE_POLICY='' status 3 1)"
+expect "polls"     0     "$(polls)"
+expect "diagnosis" found "$(found 'unable-to-review must be')"
+
 # ------------------------------------------------------------- the summary
 
 scenario "a passing verdict reaches the check summary"
 # `$GITHUB_STEP_SUMMARY` is what the run page shows beside the check. The log
 # says the same thing and scrolls; a gate that passed WITHOUT a review is
 # precisely the verdict someone re-reads long afterwards.
+#
+# Asked for by SUMMARY_FILE, never by inheriting the variable itself: under
+# Actions it is set for every step, so run_gate passing it through would have
+# each of these two dozen gate runs append a verdict to CI's own job summary —
+# a run page full of gate verdicts from a test step.
 arr 1 unable-no-files
-expect "exit"            0 "$(GITHUB_STEP_SUMMARY="$MOCK_DIR/summary.md" status 3 1)"
+expect "exit"            0 "$(SUMMARY_FILE="$MOCK_DIR/summary.md" status 3 1)"
 expect "summary written" found \
   "$(grep -q 'nothing to review' "$MOCK_DIR/summary.md" && echo found || echo lost)"
 
 scenario "a failing verdict reaches it too"
 arr 1
-expect "exit"            1 "$(GITHUB_STEP_SUMMARY="$MOCK_DIR/summary.md" status 3 1)"
+expect "exit"            1 "$(SUMMARY_FILE="$MOCK_DIR/summary.md" status 3 1)"
 expect "summary written" found \
   "$(grep -q 'no Copilot review' "$MOCK_DIR/summary.md" && echo found || echo lost)"
 

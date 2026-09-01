@@ -57,8 +57,10 @@ jobs:
           # from a transient "was unable to review any files". This list is the
           # only one that OPENS a merge, so a marker trimmed too far is the one
           # editing mistake with a merge behind it.
-          assert len(settled) >= 2 and all("able to review any files" in m for m in settled), \
-              'the settled markers must keep both apostrophe spellings'
+          # Literal, because the obvious substring does not discriminate: "was
+          # unable to review any files" CONTAINS "able to review any files".
+          assert any("wasn't able" in m for m in settled), "the ASCII apostrophe spelling is gone"
+          assert any("wasn\u2019t able" in m for m in settled), 'the typographic apostrophe spelling is gone'
           # Not decoration either: flipping this default turns a merge gate that
           # passes such a PR into one that blocks it, for everyone on the moving
           # major tag. It is a decision, so it fails here rather than shipping.
