@@ -9,6 +9,10 @@
 # refusal-retry scenarios additionally cover the failure that the canonical gist
 # shipped with — a transient re-request error retiring the refusal that triggered
 # it, so the remaining budget went unspent and the gate sat out its whole window.
+#
+# The settled-answer scenarios cover the third class: Copilot's final "there was
+# nothing here to review", which must END the wait rather than join the refusals
+# that keep it going — in whichever direction `unable-to-review` points.
 
 set -euo pipefail
 
@@ -19,6 +23,10 @@ WORK="$HERE/.tmp"
 
 REVIEWERS=$'copilot-pull-request-reviewer[bot]\ncopilot'
 MARKERS=$'pull request overview\n<summary>review details'
+# Held in a _DEFAULT and not in UNABLE_MARKERS itself: one scenario sets that to
+# the empty string to assert the class can be turned off, and a `${VAR:-...}`
+# fallback inside run_gate would quietly hand the marker back.
+UNABLE_MARKERS_DEFAULT='able to review any files in this pull request'
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 pass=0; fail=0; skipped=0
@@ -40,6 +48,9 @@ run_gate() { # run_gate <wait-seconds> <poll-seconds> [env assignments...]
   REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" \
   WAIT_SECONDS="$wait" WAIT_LABEL="${wait}s" POLL_SECONDS="$poll" \
   MAX_REREQUESTS="${MAX_REREQUESTS:-2}" \
+  UNABLE_MARKERS="${UNABLE_MARKERS-$UNABLE_MARKERS_DEFAULT}" \
+  UNABLE_POLICY="${UNABLE_POLICY:-pass}" \
+  GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
   "$@" \
   bash "$ROOT/scripts/gate.sh" > "$MOCK_DIR/out" 2>&1
 }
@@ -136,7 +147,7 @@ expect "re-requests" 1 "$(edits)"
 
 scenario "a second refusal buys a second re-request"
 arr 1 notreview-backend-error
-arr 2 notreview-backend-error notreview-no-files
+arr 2 notreview-backend-error notreview-empty-body
 expect "exit"        1 "$(status 4 1)"
 expect "re-requests" 2 "$(edits)"
 
@@ -165,9 +176,72 @@ for i in 1 2 3 4 5 6 7 8; do printf '1' > "$MOCK_DIR/edit.$i.rc"; done
 expect "exit" 1 "$(status 3 1)"
 expect "notices" 1 "$(grep -c 'will retry on the next poll' "$MOCK_DIR/out" || true)"
 
-scenario "the no-files refusal is a refusal too"
-arr 1 notreview-no-files
-expect "exit" 1 "$(status 3 1)"
+# --------------------------------------------- the settled "nothing to review"
+
+scenario "a settled 'nothing to review' ends the wait"
+# Copilot's final word on this diff. Passing is the default — the alternative
+# blocks a merge nothing can unblock — but what matters as much is that it is
+# TERMINAL: one poll, no re-request, no sitting out a window on an answer that
+# cannot change.
+arr 1 unable-no-files
+expect "exit"        0     "$(status 3 1)"
+expect "re-requests" 0     "$(edits)"
+expect "polls"       1     "$(polls)"
+expect "says why"    found "$(found 'nothing to review')"
+
+scenario "a repo can ask for a human instead"
+arr 1 unable-no-files
+expect "exit"        1     "$(UNABLE_POLICY=fail status 3 1)"
+expect "re-requests" 0     "$(edits)"
+expect "polls"       1     "$(polls)"
+expect "diagnosis"   found "$(found 'nothing reviewable')"
+
+scenario "a settled answer stops the re-requests"
+# The refusal buys its one re-request; the settled answer that follows ends the
+# run instead of spending the rest of the budget on a reply that cannot change.
+arr 1 notreview-backend-error
+arr 2 notreview-backend-error unable-no-files
+expect "exit"        0 "$(status 4 1)"
+expect "re-requests" 1 "$(edits)"
+
+scenario "a real review outranks a settled answer"
+# A push that finally gave Copilot something to read. The genuine review is
+# tested first, so it decides — and the log says which of the two it was.
+arr 1 unable-no-files review-new-format-first
+expect "exit"   0     "$(status 3 1)"
+expect "reason" found "$(found 'has reviewed')"
+
+scenario "an empty marker list restores the old behaviour"
+# The documented way back to the two-class gate: the same body becomes an
+# unrecognised one, which waits and re-requests exactly as it did before.
+arr 1 unable-no-files
+expect "exit"        1 "$(UNABLE_MARKERS='' status 3 1)"
+expect "re-requests" 1 "$(edits)"
+
+scenario "an unrecognised policy is refused before the wait"
+# Not at the point of use, which a run only reaches once Copilot has answered:
+# a typo'd policy would otherwise sit out the whole window before saying so.
+arr 1
+expect "exit"      1     "$(UNABLE_POLICY=maybe status 3 1)"
+expect "polls"     0     "$(polls)"
+expect "diagnosis" found "$(found 'unable-to-review must be')"
+
+# ------------------------------------------------------------- the summary
+
+scenario "a passing verdict reaches the check summary"
+# `$GITHUB_STEP_SUMMARY` is what the run page shows beside the check. The log
+# says the same thing and scrolls; a gate that passed WITHOUT a review is
+# precisely the verdict someone re-reads long afterwards.
+arr 1 unable-no-files
+expect "exit"            0 "$(GITHUB_STEP_SUMMARY="$MOCK_DIR/summary.md" status 3 1)"
+expect "summary written" found \
+  "$(grep -q 'nothing to review' "$MOCK_DIR/summary.md" && echo found || echo lost)"
+
+scenario "a failing verdict reaches it too"
+arr 1
+expect "exit"            1 "$(GITHUB_STEP_SUMMARY="$MOCK_DIR/summary.md" status 3 1)"
+expect "summary written" found \
+  "$(grep -q 'no Copilot review' "$MOCK_DIR/summary.md" && echo found || echo lost)"
 
 # ------------------------------------------------------------- nothing passes
 

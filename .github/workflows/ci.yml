@@ -46,11 +46,23 @@ jobs:
           assert spec['runs']['using'] == 'composite', 'must stay a composite action'
           inputs = spec['inputs']
           for name in ('github-token', 'wait-minutes', 'max-rerequests',
-                       'poll-seconds', 'reviewers', 'review-markers'):
+                       'poll-seconds', 'reviewers', 'review-markers',
+                       'unable-to-review', 'unable-to-review-markers'):
               assert name in inputs, f'input {name} disappeared'
           markers = [m.strip() for m in inputs['review-markers']['default'].splitlines() if m.strip()]
           assert len(markers) >= 2, 'both review formats must stay covered'
-          print('action.yml OK —', len(markers), 'markers,',
+          settled = [m.strip() for m in inputs['unable-to-review-markers']['default'].splitlines() if m.strip()]
+          assert settled, 'the settled "nothing to review" answer must stay recognised'
+          # Not decoration either: flipping this default turns a merge gate that
+          # passes such a PR into one that blocks it, for everyone on the moving
+          # major tag. It is a decision, so it fails here rather than shipping.
+          assert inputs['unable-to-review']['default'] == 'pass', \
+              'the unable-to-review default is part of the contract'
+          # An input nothing passes through is an input that does nothing.
+          env = [s for s in spec['runs']['steps'] if 'run' in s][0]['env']
+          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS'):
+              assert var in env, f'{var} never reaches the script'
+          print('action.yml OK —', len(markers), 'markers,', len(settled), 'settled markers,',
                 len([r for r in inputs['reviewers']['default'].splitlines() if r.strip()]), 'reviewers')
           PY
 
