@@ -30,7 +30,11 @@ MARKERS=$'pull request overview\n<summary>review details'
 # Held in a _DEFAULT and not in UNABLE_MARKERS itself: one scenario sets that to
 # the empty string to assert the class can be turned off, and a `${VAR:-...}`
 # fallback inside run_gate would quietly hand the marker back.
-UNABLE_MARKERS_DEFAULT=$'wasn\'t able to review any files\nwasn\u2019t able to review any files'
+# The typographic apostrophe is embedded, not written as `\u2019`: bash only reads
+# that escape from 4.2 on, and macOS still ships 3.2 — where the marker would
+# silently become the literal `wasn\u2019t` and the suite would run against a list
+# action.yml does not ship.
+UNABLE_MARKERS_DEFAULT=$'wasn\'t able to review any files\nwasn’t able to review any files'
 # The head the settled class is pinned to — read off the fixture, so a recapture
 # with another sha does not need a second edit here.
 HEAD_SHA_DEFAULT="$(jq -r '.commit_id // ""' "$FIXTURES/unable-no-files.json")"

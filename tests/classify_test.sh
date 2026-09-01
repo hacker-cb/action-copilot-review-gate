@@ -143,6 +143,15 @@ check "empty marker list disables it" not-a-review \
      | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="" HEAD_SHA="$HEAD_SHA" \
        jq -r -f "$ROOT/scripts/classify.jq" | verdict)" ""
 
+# The excerpt, not just the class. The timeout dump is the only thing that says
+# WHAT arrived, and a body of whitespace has to reach it as "(empty body)" — the
+# dump trims leading whitespace, so a body reported as itself prints as a blank
+# line exactly where the diagnosis was promised.
+echo
+echo "classify.jq — the excerpt a whitespace-only body reports"
+check "empty body says so" $'not-a-review\t(empty body)' \
+  "$(jq -s '.' "$FIXTURES/notreview-empty-body.json" | classify)" ""
+
 # The whole corpus at once — the real shape of an API response, and the case
 # where one bad row can abort the program and take every finding with it.
 echo

@@ -69,7 +69,11 @@ set -euo pipefail
 # runs before this file at all. Both report in the log alone — see the README.
 summarize() {
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
-  printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+  # The braces matter. Redirections are applied left to right, so on a path that
+  # cannot be opened `printf >> "$f" 2>/dev/null` reports the failure to the
+  # ORIGINAL stderr — the gate's log — before it ever installs the silencer.
+  # Grouping puts the open inside what is being silenced.
+  { printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; } 2>/dev/null || true
 }
 
 # Checked here rather than at the point of use, which a run only reaches after

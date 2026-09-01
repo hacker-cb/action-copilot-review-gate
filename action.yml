@@ -86,8 +86,12 @@ inputs:
       so the gate goes on waiting and re-requesting there. `pass` because
       demanding a review of an unreviewable diff blocks a merge nothing can
       unblock, which in practice launders the requirement into an admin bypass —
-      the muscle this gate exists to keep people from building. Set `fail` where
-      such a pull request should stop for a human instead.
+      the muscle this gate exists to keep people from building.
+      SET `fail` IF YOUR REPOSITORY USES COPILOT CONTENT EXCLUSION, or has
+      paths whose file types Copilot does not support: the same sentence is what
+      it answers when every changed file was excluded from its view, and there
+      the diff is ordinary code that simply nobody read. `pass` is chosen for
+      the unreviewable-diff case, and it cannot tell the two apart.
     required: false
     default: "pass"
 

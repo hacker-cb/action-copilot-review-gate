@@ -224,7 +224,15 @@ gate says so in the log and goes back to waiting and re-requesting, which is wha
 gets Copilot to answer for the commit that is actually there. That pinning is this
 class only; a genuine review still counts on any commit, for the reason above.
 
-Repositories that would rather force a human to look set:
+**One case deserves `fail` rather than the default.** Copilot answers the same
+sentence when every changed file was hidden from it by **content exclusion**, or
+when none of the changed file types is one it supports. There the diff is ordinary
+code that simply nobody read, and head-pinning does not help — the answer *is* for
+the current head. The gate cannot tell that apart from an empty diff, so a
+repository with content-exclusion rules should set `unable-to-review: fail` and let
+a human look.
+
+Repositories that would rather force a human to look — that case included — set:
 
 ```yaml
       - uses: hacker-cb/action-copilot-review-gate@v1

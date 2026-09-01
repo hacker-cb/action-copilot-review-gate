@@ -67,7 +67,11 @@ def excerpt:
   (.body? // "")
   | .[0:160]
   | gsub("[\r\n]"; " ")
-  | if test("[^ ]") then . else "(empty body)" end;
+  # `[^[:space:]]` and not `[^ ]`: the newlines are gone by now but a TAB is not,
+  # and a body of tabs would otherwise be reported as itself — which the timeout
+  # dump, trimming leading whitespace, then prints as a blank line where it
+  # promised to say what arrived.
+  | if test("[^[:space:]]") then . else "(empty body)" end;
 
 [ .[]
   | select(
