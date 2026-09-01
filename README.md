@@ -241,10 +241,13 @@ is positive, it fails **closed**: merges block rather than a PR sneaking through
 unreviewed. That is the direction a merge gate is allowed to break in, but it still
 blocks you, so:
 
-- The timeout message prints the bodies it actually saw, next to the markers it
-  matched them against. The log tells you what changed.
+- The timeout message prints the bodies it actually saw, next to **both** marker
+  lists it matched them against. The log tells you what changed, and which list
+  wants the entry.
 - Add the new marker to `review-markers` — **add**, don't replace, so PRs mid-flight
-  under the old format keep passing.
+  under the old format keep passing. A reworded "nothing to review" answer goes to
+  `unable-to-review-markers` the same way; until it does, such a body is simply
+  unrecognised and the gate waits, which is the safe direction.
 - Both current formats are covered by the defaults, so an upgrade is usually all you
   need.
 
@@ -267,7 +270,7 @@ repository — the gap that let one format change break the gate everywhere at o
 ## Development
 
 ```bash
-bash tests/classify_test.sh   # review vs refusal, fixture by fixture
+bash tests/classify_test.sh   # review vs settled answer vs refusal, fixture by fixture
 bash tests/gate_test.sh       # the whole loop, against a mock gh
 ```
 
@@ -286,8 +289,8 @@ it against a mock `timeout`.
 The repository gates itself with the action from the PR's own head (`uses: ./`), which
 is the one check no fixture can stand in for: fixtures say what a review looked like
 when captured, the self-gate says what one looks like today. What it exercises live is
-the happy path — a review arrives, the gate passes; the refusal, re-request and
-closed-PR branches rest on fixtures alone.
+the happy path — a review arrives, the gate passes; the refusal, re-request,
+settled-answer and closed-PR branches rest on fixtures alone.
 
 ## Licence
 
