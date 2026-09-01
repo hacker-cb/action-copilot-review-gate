@@ -14,6 +14,12 @@ records cleared the gate on pull requests nobody had read. This action recognise
 a review *is* — a positive marker — so an unrecognised body keeps the gate **waiting**
 rather than opening it, and re-requests the review, which nothing else does.
 
+**A settled "nothing to review" is not a pending one either.** Copilot's other
+non-review — "wasn't able to review any files in this pull request" — is its final
+answer for that diff, not a backend hiccup a retry can fix. It gets a class of its
+own, and by default it passes the gate: see
+[When Copilot has nothing to review](#when-copilot-has-nothing-to-review).
+
 ## Usage
 
 Add one workflow to your repository:
@@ -93,6 +99,8 @@ Every input has a working default; set one only when you mean to.
 | `poll-seconds` | `30` | Seconds between polls of the reviews API. Lands in the hard ceiling too, because the loop sleeps after testing its deadline. |
 | `reviewers` | two logins | Logins that count as Copilot, one per line. An allowlist, never a prefix. |
 | `review-markers` | two markers | Body substrings that mark a review as genuine, one per line; any one is enough. |
+| `unable-to-review` | `pass` | What a settled "nothing to review" answer does to the gate — `pass` or `fail`. See [below](#when-copilot-has-nothing-to-review). |
+| `unable-to-review-markers` | two markers | Body substrings that mark that settled answer, one per line. Empty turns the class off. |
 
 ## What the gate actually checks
 
@@ -103,9 +111,19 @@ so gating on the exact head SHA would dead-lock the common "apply the feedback, 
 push" case. Gating on first-review-seen closes the real race without false-blocking
 later pushes.
 
-Three cases pass without a review, because requiring one would deadlock: a **draft**
+Four cases pass without a review, because requiring one would deadlock: a **draft**
 PR, a **bot-authored** PR (Dependabot and friends — Copilot does not review either),
-and a PR that was **closed or merged while the gate was waiting**.
+a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
+answered it had **nothing reviewable in** *at the current head* — the one of the four
+you can switch off.
+
+Every verdict the gate reaches writes a one-line summary line, so a gate that passed
+*without* a review says so on the run page rather than only in a log someone has to
+scroll. Two things that are not verdicts report in the log alone: the step's preflight
+— no pull request in the event, a missing `gh`/`jq`/`timeout`, a non-numeric input,
+the hard ceiling firing — which runs before the gate script at all, and that script's
+own required-variable guards, which fire only when the plumbing between the two is
+broken.
 
 The `pull-requests: write` scope buys exactly one operation — adding Copilot back as a
 reviewer after it answered without reviewing. The job never checks out your code,
@@ -181,6 +199,62 @@ your repository. This action checks nothing out, which is what makes the swap
 thinkable at all; it has not been exercised in the field, so treat it as an option
 to verify rather than a recommendation to follow.
 
+## When Copilot has nothing to review
+
+Some legitimate pull requests have no reviewable diff — an empty-file deletion, a
+pure rename, a binary-only or lockfile-only change. Copilot answers those promptly
+and deterministically:
+
+> Copilot wasn't able to review any files in this pull request.
+
+That is not the backend apology above. It is Copilot's **final** answer for this
+diff: the same diff gets the same reply, so re-requesting is a provable no-op, and
+a gate that keeps waiting blocks a merge nothing can unblock. In practice that
+means an admin bypass — exactly the muscle this gate exists to keep people from
+building. So the gate recognises the answer as its own class and, by default,
+**passes** on it, ending the wait at once instead of spending the window and the
+re-request budget on it.
+
+**For this diff is the whole of it.** The reviews endpoint returns every review a
+pull request ever collected, so an answer given to an empty diff is still sitting
+there after the author pushes real code — and a gate reading it would open before
+Copilot had read a line. The class is therefore pinned to the pull request's
+**current head commit**. The same body against an older one settles nothing: the
+gate says so in the log and goes back to waiting and re-requesting, which is what
+gets Copilot to answer for the commit that is actually there. That pinning is this
+class only; a genuine review still counts on any commit, for the reason above.
+
+**One case deserves `fail` rather than the default.** Copilot answers the same
+sentence when every changed file was hidden from it by **content exclusion**, or
+when none of the changed file types is one it supports. There the diff is ordinary
+code that simply nobody read, and head-pinning does not help — the answer *is* for
+the current head. The gate cannot tell that apart from an empty diff, so a
+repository with content-exclusion rules should set `unable-to-review: fail` and let
+a human look.
+
+Repositories that would rather force a human to look — that case included — set:
+
+```yaml
+      - uses: hacker-cb/action-copilot-review-gate@v1
+        with:
+          unable-to-review: fail
+```
+
+which keeps the check red — and says why, immediately, instead of after the full
+`wait-minutes`.
+
+Both directions print the body they matched and write the verdict to the job
+summary, so a pull request that merged on this answer is legible after the fact.
+
+This is the one list that can **open** a merge rather than hold it, so its markers
+are the ones to edit carefully. The defaults keep `wasn't`, which is what tells the
+settled answer apart from a transient failure phrased around "was unable to review
+any files" — and carry it twice, once per apostrophe, because Copilot mixes the
+ASCII and typographic forms inside a single body. A body no marker covers stays
+unrecognised and the gate waits, as before — the safe direction. Emptying
+`unable-to-review-markers` turns the class off entirely and restores that two-class
+behaviour.
+
 ## When Copilot changes its review format
 
 It has, and it will again. In August 2026 the review moved from a
@@ -191,10 +265,13 @@ is positive, it fails **closed**: merges block rather than a PR sneaking through
 unreviewed. That is the direction a merge gate is allowed to break in, but it still
 blocks you, so:
 
-- The timeout message prints the bodies it actually saw, next to the markers it
-  matched them against. The log tells you what changed.
+- The timeout message prints the bodies it actually saw, next to **both** marker
+  lists it matched them against. The log tells you what changed, and which list
+  wants the entry.
 - Add the new marker to `review-markers` — **add**, don't replace, so PRs mid-flight
-  under the old format keep passing.
+  under the old format keep passing. A reworded "nothing to review" answer goes to
+  `unable-to-review-markers` the same way; until it does, such a body is simply
+  unrecognised and the gate waits, which is the safe direction.
 - Both current formats are covered by the defaults, so an upgrade is usually all you
   need.
 
@@ -217,25 +294,38 @@ repository — the gap that let one format change break the gate everywhere at o
 ## Development
 
 ```bash
-bash tests/classify_test.sh   # review vs refusal, fixture by fixture
+bash tests/classify_test.sh   # review vs settled answer vs refusal, fixture by fixture
 bash tests/gate_test.sh       # the whole loop, against a mock gh
 ```
 
 The review fixtures are **real bodies** captured from live pull requests across four
-repositories, including both formats and both kinds of refusal. That matters: this
+repositories, including both formats and both kinds of non-review. That matters: this
 suite exists because a hand-written fixture would have kept passing while production
-broke. `tests/classify_test.sh` reads the marker and reviewer defaults out of
-`action.yml`, so editing a default without a fixture to match fails the suite. The
-last two scenarios of `tests/gate_test.sh` cover the hard ceiling, which lives in
-`action.yml` rather than in the script — they read that step's `run:` body out of the
-file (python3 with PyYAML, the dependency CI's contract check already uses) and run
-it against a mock `timeout`.
+broke. A fixture's name declares its verdict — `review-*`, `unable-*` (the settled
+"nothing to review"), `notreview-*` (unrecognised), `ignored-*` (not Copilot) — and
+`tests/classify_test.sh` reads the marker and reviewer defaults out of `action.yml`,
+so editing a default without a fixture to match fails the suite.
+
+One envelope field is not captured. The settled class is pinned to the head commit,
+and the capture did not keep the `commit_id` it came with, so that fixture carries a
+synthetic one and both suites take their idea of "current head" from that field
+rather than repeating it. What the pinning depends on — that a review's `commit_id`
+is the branch commit it was left on, not a merge ref — is not something the fixture
+can show; it was checked against this repository's own pull requests, where
+[#1](https://github.com/hacker-cb/action-copilot-review-gate/pull/1) carries one
+Copilot review on an earlier commit and a second on the head, which is exactly the
+case the pinning exists for.
+
+The closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's
+own input validation, which live in `action.yml` rather than in the script — they
+read that step's `run:` body out of the file (python3 with PyYAML, the dependency
+CI's contract check already uses) and run it against a mock `timeout`.
 
 The repository gates itself with the action from the PR's own head (`uses: ./`), which
 is the one check no fixture can stand in for: fixtures say what a review looked like
 when captured, the self-gate says what one looks like today. What it exercises live is
-the happy path — a review arrives, the gate passes; the refusal, re-request and
-closed-PR branches rest on fixtures alone.
+the happy path — a review arrives, the gate passes; the refusal, re-request,
+settled-answer and closed-PR branches rest on fixtures alone.
 
 ## Licence
 

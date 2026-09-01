@@ -3,6 +3,7 @@
     "login": "copilot-pull-request-reviewer[bot]",
     "type": "Bot"
   },
+  "commit_id": "0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f607182930",
   "state": "COMMENTED",
   "body": "Copilot wasn't able to review any files in this pull request.\n\n\n\n\n\n---\n\n💡 <a href=\"/hacker-cb/claude-manager/new/dev?filename=.github/skills/code-review/SKILL.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add a `code-review` agent skill</a> or configure MCP servers for context-aware, tailored reviews. <a href=\"https://docs.github.com/en/copilot/how-tos/use-copilot-agents/request-a-code-review/use-code-review#mcp-servers-and-agent-skills\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn more in the docs.</a>"
 }

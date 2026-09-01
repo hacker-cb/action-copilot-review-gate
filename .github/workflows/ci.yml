@@ -42,15 +42,38 @@ jobs:
           # shipping.
           python3 - <<'PY'
           import sys, yaml
-          spec = yaml.safe_load(open('action.yml'))
+          # Explicit encoding: action.yml carries a typographic apostrophe, and
+          # Python reads text in the locale's encoding, which is not UTF-8
+          # everywhere a self-hosted runner might live.
+          spec = yaml.safe_load(open('action.yml', encoding='utf-8'))
           assert spec['runs']['using'] == 'composite', 'must stay a composite action'
           inputs = spec['inputs']
           for name in ('github-token', 'wait-minutes', 'max-rerequests',
-                       'poll-seconds', 'reviewers', 'review-markers'):
+                       'poll-seconds', 'reviewers', 'review-markers',
+                       'unable-to-review', 'unable-to-review-markers'):
               assert name in inputs, f'input {name} disappeared'
           markers = [m.strip() for m in inputs['review-markers']['default'].splitlines() if m.strip()]
           assert len(markers) >= 2, 'both review formats must stay covered'
-          print('action.yml OK —', len(markers), 'markers,',
+          settled = [m.strip() for m in inputs['unable-to-review-markers']['default'].splitlines() if m.strip()]
+          assert settled, 'the settled "nothing to review" answer must stay recognised'
+          # Both apostrophes, and the word that tells the settled answer apart
+          # from a transient "was unable to review any files". This list is the
+          # only one that OPENS a merge, so a marker trimmed too far is the one
+          # editing mistake with a merge behind it.
+          # Literal, because the obvious substring does not discriminate: "was
+          # unable to review any files" CONTAINS "able to review any files".
+          assert any("wasn't able" in m for m in settled), "the ASCII apostrophe spelling is gone"
+          assert any("wasn\u2019t able" in m for m in settled), 'the typographic apostrophe spelling is gone'
+          # Not decoration either: flipping this default turns a merge gate that
+          # passes such a PR into one that blocks it, for everyone on the moving
+          # major tag. It is a decision, so it fails here rather than shipping.
+          assert inputs['unable-to-review']['default'] == 'pass', \
+              'the unable-to-review default is part of the contract'
+          # An input nothing passes through is an input that does nothing.
+          env = [s for s in spec['runs']['steps'] if 'run' in s][0]['env']
+          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS', 'HEAD_SHA'):
+              assert var in env, f'{var} never reaches the script'
+          print('action.yml OK —', len(markers), 'markers,', len(settled), 'settled markers,',
                 len([r for r in inputs['reviewers']['default'].splitlines() if r.strip()]), 'reviewers')
           PY
 

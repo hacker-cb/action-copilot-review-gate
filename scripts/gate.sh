@@ -4,6 +4,15 @@
 # Anything else — no review, or a review record that is not a review — keeps the
 # gate waiting and finally fails it, blocking the merge.
 #
+# The one exception is Copilot's SETTLED answer that there was nothing to review
+# ("wasn't able to review any files") ON THE CURRENT HEAD: that is its final word
+# on this diff rather than a review still coming, so it ends the wait at once —
+# passing by default, failing where `unable-to-review: fail` asks for a human to
+# look instead. The same answer against an older commit settles nothing (the
+# author may have pushed real code since) and is treated as an unanswered
+# review: the gate waits, and re-requests. scripts/classify.jq owns the classes
+# and why they are separate.
+#
 # The gate checks "Copilot has reviewed this PR" (any commit), NOT the current
 # head commit: Copilot's "Review new pushes" does not reliably re-review every
 # push — in particular a push that only applies Copilot's own suggestions gets no
@@ -32,16 +41,63 @@ set -euo pipefail
 : "${AUTHOR_TYPE:=}"
 : "${REVIEWERS:?REVIEWERS is required}"
 : "${MARKERS:?MARKERS is required}"
+# Defaulted rather than required, and the two are not the same claim: an EMPTY
+# negative list is a meaningful setting — it turns the class off and restores the
+# behaviour this gate had before it existed — so `:?` would refuse a
+# configuration that is deliberately available.
+: "${UNABLE_MARKERS=}"
+# `=` and not `:=` — the default is for an UNSET variable only. A caller wiring
+# this to `${{ vars.SOMETHING }}` that does not exist passes an empty string, and
+# `:=` would rewrite that to `pass` before the check below ever saw it: a
+# misconfigured repo would then silently take the fail-OPEN side of the one input
+# whose whole purpose is choosing a side. Empty now reaches the check and stops
+# the run, which is what every numeric input in action.yml already does with it.
+: "${UNABLE_POLICY=pass}"
+# The commit a settled "nothing to review" has to be about to settle anything.
+# Defaulted, not required — and empty means nothing is ever settled, so a value
+# lost in the plumbing keeps the gate waiting rather than opening it.
+: "${HEAD_SHA=}"
+
+# The check's own summary, in one line per outcome. The log says the same thing,
+# but it scrolls, and a gate that PASSED without a review — a draft, a bot author,
+# a settled "nothing to review" — is exactly the verdict someone re-reads long
+# afterwards and wants legible at a glance. Absent outside Actions (the tests run
+# this script directly), and an unwritable path is not worth failing a gate over.
+#
+# Defined above the first VERDICT this script can reach. What is above it is not
+# one: the `:?` guards are broken plumbing, and the step's preflight in action.yml
+# runs before this file at all. Both report in the log alone — see the README.
+summarize() {
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+  # The braces matter. Redirections are applied left to right, so on a path that
+  # cannot be opened `printf >> "$f" 2>/dev/null` reports the failure to the
+  # ORIGINAL stderr — the gate's log — before it ever installs the silencer.
+  # Grouping puts the open inside what is being silenced.
+  { printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; } 2>/dev/null || true
+}
+
+# Checked here rather than at the point of use, which a run only reaches after
+# Copilot has answered: a typo'd policy would otherwise sit through the whole
+# window before saying so, and "pass" is not a safe reading to fall back to for
+# a value nobody recognised.
+case "$UNABLE_POLICY" in
+  pass|fail) ;;
+  *) echo "::error::unable-to-review must be 'pass' or 'fail', got '$UNABLE_POLICY'."
+     summarize "**Copilot review gate** — **failed**: \`unable-to-review\` must be \`pass\` or \`fail\`, got \`$UNABLE_POLICY\`."
+     exit 1 ;;
+esac
 
 # Copilot does not review drafts or bot-authored PRs (e.g. Dependabot), so
 # requiring its review there would deadlock. Pass the gate at once. Bots are
 # detected by GitHub's account type rather than a login-suffix glob.
 if [ "$IS_DRAFT" = "true" ]; then
   echo "Draft PR: Copilot review not expected — gate passes."
+  summarize "**Copilot review gate** — passed: draft pull request, no Copilot review expected."
   exit 0
 fi
 if [ "$AUTHOR_TYPE" = "Bot" ]; then
   echo "Bot author '$AUTHOR': Copilot does not review — gate passes."
+  summarize "**Copilot review gate** — passed: bot author \`$AUTHOR\`, which Copilot does not review."
   exit 0
 fi
 
@@ -66,6 +122,7 @@ fetch_reviews() {
 }
 
 reported=0        # refusals already announced in the log
+stale_reported=0  # stale settled answers already announced
 answered=0        # refusals a re-request was actually SENT for
 rerequested=0     # successful re-requests, against MAX_REREQUESTS
 failed_notice=0   # whether the current run of request failures was announced
@@ -81,7 +138,8 @@ while :; do
   kinds=""
   if raw="$(fetch_reviews)" && [ -n "$raw" ]; then
     if kinds="$(printf '%s' "$raw" \
-        | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" \
+        | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="$UNABLE_MARKERS" \
+          HEAD_SHA="$HEAD_SHA" \
           jq -r -f "$ACTION_PATH/scripts/classify.jq" 2>>"$api_err")"; then
       polled=1
     else
@@ -90,18 +148,50 @@ while :; do
   fi
 
   reviewed=$(printf '%s\n' "$kinds" | grep -c '^review$' || true)
-  refused=$(printf '%s\n' "$kinds" | grep -c '^not-a-review' || true)
+  settled=$(printf '%s\n' "$kinds" | grep -c '^unable-to-review' || true)
+  stale=$(printf '%s\n' "$kinds" | grep -c '^stale-unable-to-review' || true)
+  # A settled answer about an older commit is exactly as informative about the
+  # current one as a backend apology is — nothing — so it joins the refusals and
+  # buys the same re-request, which is what gets Copilot to answer for the head
+  # that is actually there. `^unable-to-review` does not match it: the anchor is
+  # what keeps the two apart.
+  unrecognised=$(printf '%s\n' "$kinds" | grep -c '^not-a-review' || true)
+  refused=$(( unrecognised + stale ))
 
   # Only when this poll actually answered. A transient API failure leaves kinds
   # empty, and overwriting here would erase the error replies earlier polls
   # recorded — the timeout would then print no hint that Copilot had answered.
   if [ "$polled" = 1 ]; then
-    printf '%s\n' "$kinds" | grep '^not-a-review' > "$seen_bodies" || true
+    printf '%s\n' "$kinds" | grep -e '^not-a-review' -e '^stale-unable-to-review' > "$seen_bodies" || true
   fi
 
   if [ "${reviewed:-0}" -gt 0 ]; then
     echo "Copilot has reviewed PR #$PR — gate passes."
+    summarize "**Copilot review gate** — passed: Copilot reviewed PR #$PR."
     exit 0
+  fi
+
+  # Checked AFTER a genuine review, so one arriving later — a push that finally
+  # gave Copilot something to read — still outranks the settled answer this PR
+  # collected earlier. Both directions end the wait here rather than sitting out
+  # the window: "nothing to review" is Copilot's final word on this diff, so
+  # neither another poll nor another re-request can change it.
+  if [ "${settled:-0}" -gt 0 ]; then
+    echo "Copilot answered that there is nothing to review in PR #$PR:"
+    # `grep` then `sed`, and `[[:space:]]` rather than `\t`: BSD sed reads `\t`
+    # in a BRE as a literal `t`, so the substitution simply would not fire — and
+    # under `sed -n` that prints nothing at all rather than printing the line
+    # unindented. The bodies are the whole point of this branch.
+    printf '%s\n' "$kinds" | grep '^unable-to-review' \
+      | sed 's/^unable-to-review[[:space:]]*/  /'
+    if [ "$UNABLE_POLICY" = "pass" ]; then
+      echo "That is a settled answer for this diff, not a review still coming — gate passes (unable-to-review: pass)."
+      summarize "**Copilot review gate** — passed: Copilot answered that there was nothing to review in PR #$PR (\`unable-to-review: pass\`)."
+      exit 0
+    fi
+    echo "::error::Copilot found nothing reviewable in PR #$PR and \`unable-to-review\` is set to \`fail\` — gate blocks the merge, so a human reviews it instead."
+    summarize "**Copilot review gate** — **failed**: Copilot found nothing reviewable in PR #$PR and \`unable-to-review: fail\` asks for a human review."
+    exit 1
   fi
 
   # Announce a refusal only when the count moves, or a 15-minute wait prints the
@@ -110,10 +200,25 @@ while :; do
     echo "Copilot answered $refused time(s) without reviewing."
     reported=$refused
   fi
+  # Said separately, because it reads as a contradiction otherwise: the gate has
+  # a "nothing to review" answer in hand and is still waiting.
+  if [ "${stale:-0}" -gt "${stale_reported:-0}" ]; then
+    if [ -n "$HEAD_SHA" ]; then
+      echo "Copilot's \"nothing to review\" answer on PR #$PR is not for the current head ($HEAD_SHA) — it settles an older commit, so the gate keeps waiting."
+    else
+      # No comparison happened at all, and blaming Copilot for that would send
+      # the reader looking in the wrong place: what is missing is the head this
+      # gate was supposed to be handed.
+      echo "::warning::Copilot answered \"nothing to review\" on PR #$PR, but no head commit reached the gate, so nothing can be settled against it. Check that \`github.event.pull_request.head.sha\` is present — this event may not be a \`pull_request\`."
+    fi
+    stale_reported=$stale
+  fi
 
   # Ask again. That reply is what Copilot sends when its backend failed, and it
   # does not retry on its own — its own review fires no workflow, so nothing else
   # will. Waiting out the window without asking is just a slower way to fail.
+  # Only UNRECOGNISED bodies get here: the settled answer above already left, and
+  # re-requesting it would be the provable no-op that motivated its own class.
   #
   # `answered` advances only on a SUCCESSFUL request. Advancing it beside the
   # announcement above — which is what the canonical gist did — meant one
@@ -145,20 +250,35 @@ done
 state_now="$(gh api "repos/$REPO/pulls/$PR" --jq '.state' 2>/dev/null || true)"
 if [ "$state_now" = "closed" ]; then
   echo "PR #$PR closed while this run was waiting — nothing left to gate."
+  summarize "**Copilot review gate** — passed: PR #$PR closed while the gate was waiting."
   exit 0
 fi
 
 # fail-closed: no review in the window (or the API stayed unreachable) blocks the
 # merge. Surface everything that might explain it.
 echo "::error::Copilot has not reviewed PR #$PR within the timeout (or the GitHub API was unavailable) — gate blocks the merge."
+summarize "**Copilot review gate** — **failed**: no Copilot review of PR #$PR within $WAIT_LABEL."
 if [ -s "$seen_bodies" ]; then
   # What DID arrive. Either Copilot kept failing — re-request the review — or its
   # review format changed and the `review-markers` input needs a new entry; these
-  # bodies say which.
+  # bodies say which. A body that is really the settled "nothing to review" under
+  # wording no marker covers lands here too, and `unable-to-review-markers` is
+  # then the list wanting the new entry.
   echo "Copilot posted the following, none of which is a review:"
-  sed 's/^not-a-review\t/  /' "$seen_bodies"
+  # The marker on the stale ones says only that they were not counted. WHY they
+  # were not — an older commit, or no head at all — was said once above, in a
+  # branch that knows which of the two it was; repeating a guess here is how a
+  # missing input ends up reading as Copilot's fault.
+  sed -e 's/^not-a-review[[:space:]]*/  /' \
+      -e 's/^stale-unable-to-review[[:space:]]*/  (a "nothing to review" answer, not counted) /' "$seen_bodies"
   echo "Markers a body is matched against (any one is enough):"
   printf '%s\n' "$MARKERS" | sed '/^[[:space:]]*$/d; s/^/  /'
+  # Only when there is a list to print: empty is the documented way to turn the
+  # class off, and a heading over nothing reads as "configured, just no match".
+  if printf '%s\n' "$UNABLE_MARKERS" | grep -q '[^[:space:]]'; then
+    echo "Markers for a settled \"nothing to review\" answer, counted only against head ${HEAD_SHA:-unknown}:"
+    printf '%s\n' "$UNABLE_MARKERS" | sed '/^[[:space:]]*$/d; s/^/  /'
+  fi
 fi
 echo "Re-requests sent: $rerequested of $MAX_REREQUESTS allowed."
 if [ -s "$req_err" ]; then
