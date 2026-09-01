@@ -81,10 +81,13 @@ inputs:
       empty-file deletion, a pure rename, a binary-only or lockfile-only change.
       It is its FINAL word on that diff, not a review still coming, so the gate
       stops waiting either way and never re-requests: the same diff gets the same
-      answer. `pass` because demanding a review of an unreviewable diff blocks a
-      merge nothing can unblock, which in practice launders the requirement into
-      an admin bypass — the muscle this gate exists to keep people from building.
-      Set `fail` where such a pull request should stop for a human instead.
+      answer. It counts only for the pull request's CURRENT head — the same
+      answer against an older commit says nothing about the code pushed since,
+      so the gate goes on waiting and re-requesting there. `pass` because
+      demanding a review of an unreviewable diff blocks a merge nothing can
+      unblock, which in practice launders the requirement into an admin bypass —
+      the muscle this gate exists to keep people from building. Set `fail` where
+      such a pull request should stop for a human instead.
     required: false
     default: "pass"
 
@@ -93,15 +96,19 @@ inputs:
       Body substrings that mark an answer as that settled "nothing to review",
       one per line; matching any one is enough, case-insensitively. Distinct from
       `review-markers` and from an unrecognised body, which keeps the gate waiting
-      and gets re-requested — this list is the one that ends the wait. The default
-      deliberately starts AFTER the apostrophe in "wasn't": Copilot mixes the
-      ASCII and typographic forms inside a single body, and a marker carrying
-      either one stops matching when it emits the other. An empty list turns the
+      and gets re-requested — this list is the one that ends the wait, and it is
+      therefore the only fail-OPEN surface here: a marker matching one word too
+      few opens a merge instead of holding it. So the defaults keep `wasn't`,
+      which is what tells the settled answer apart from a transient failure
+      phrased around "was unable to review" — and carry it twice, because
+      Copilot mixes the ASCII and typographic apostrophes inside a single body
+      and a marker with one of them misses the other. An empty list turns the
       class off entirely and restores the behaviour this gate had before it
       existed.
     required: false
     default: |
-      able to review any files in this pull request
+      wasn't able to review any files
+      wasn’t able to review any files
 
 runs:
   using: composite
@@ -121,6 +128,7 @@ runs:
         MARKERS: ${{ inputs.review-markers }}
         UNABLE_POLICY: ${{ inputs.unable-to-review }}
         UNABLE_MARKERS: ${{ inputs.unable-to-review-markers }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       # Every value reaches the script through `env:` above — never `${{ }}`
       # interpolated into this body, which would be a script-injection surface.
       run: |

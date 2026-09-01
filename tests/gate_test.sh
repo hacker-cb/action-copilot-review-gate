@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # End-to-end tests for scripts/gate.sh, driven by the mock `gh` in tests/mock-bin,
-# plus the hard ceiling around it — which lives in action.yml, so the last two
-# scenarios run that step's own script against a mock `timeout`.
+# plus the hard ceiling and the numeric-input validation around it — those live in
+# action.yml, so the closing scenarios run that step's own script against a mock
+# `timeout`.
 #
 # What each scenario is really asserting is the DIRECTION the gate fails in: an
 # unreviewed PR must never pass, and a genuine review must never be held. The
@@ -12,7 +13,10 @@
 #
 # The settled-answer scenarios cover the third class: Copilot's final "there was
 # nothing here to review", which must END the wait rather than join the refusals
-# that keep it going — in whichever direction `unable-to-review` points.
+# that keep it going — in whichever direction `unable-to-review` points, and only
+# while it is about the head the gate was handed. The same answer about an older
+# commit has to fall back among the refusals, or a pull request that once had
+# nothing to review would clear the gate forever after.
 
 set -euo pipefail
 
@@ -26,7 +30,11 @@ MARKERS=$'pull request overview\n<summary>review details'
 # Held in a _DEFAULT and not in UNABLE_MARKERS itself: one scenario sets that to
 # the empty string to assert the class can be turned off, and a `${VAR:-...}`
 # fallback inside run_gate would quietly hand the marker back.
-UNABLE_MARKERS_DEFAULT='able to review any files in this pull request'
+UNABLE_MARKERS_DEFAULT=$'wasn\'t able to review any files\nwasn\u2019t able to review any files'
+# The head the settled class is pinned to — read off the fixture, so a recapture
+# with another sha does not need a second edit here.
+HEAD_SHA_DEFAULT="$(jq -r '.commit_id // ""' "$FIXTURES/unable-no-files.json")"
+[ -n "$HEAD_SHA_DEFAULT" ] || { echo "FATAL: unable-no-files.json carries no commit_id"; exit 1; }
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 pass=0; fail=0; skipped=0
@@ -50,6 +58,7 @@ run_gate() { # run_gate <wait-seconds> <poll-seconds> [env assignments...]
   MAX_REREQUESTS="${MAX_REREQUESTS:-2}" \
   UNABLE_MARKERS="${UNABLE_MARKERS-$UNABLE_MARKERS_DEFAULT}" \
   UNABLE_POLICY="${UNABLE_POLICY:-pass}" \
+  HEAD_SHA="${HEAD_SHA-$HEAD_SHA_DEFAULT}" \
   GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
   "$@" \
   bash "$ROOT/scripts/gate.sh" > "$MOCK_DIR/out" 2>&1
@@ -210,6 +219,27 @@ scenario "a real review outranks a settled answer"
 arr 1 unable-no-files review-new-format-first
 expect "exit"   0     "$(status 3 1)"
 expect "reason" found "$(found 'has reviewed')"
+
+scenario "a settled answer about an older commit settles nothing"
+# The regression both reviewers found: the reviews endpoint returns every review
+# the PR ever collected, so a "nothing to review" answer to an empty diff sits
+# there after the author pushes real code. Pinned to the head, it stops deciding.
+arr 1 unable-no-files
+expect "exit"        1     "$(HEAD_SHA=1234567812345678123456781234567812345678 status 3 1)"
+expect "re-requests" 1     "$(edits)"
+expect "says why"    found "$(found 'not for the current head')"
+
+scenario "a stale settled answer still yields to a real review"
+arr 1 unable-no-files
+arr 2 unable-no-files review-new-format-first
+expect "exit"   0     "$(HEAD_SHA=1234567812345678123456781234567812345678 status 4 1)"
+expect "reason" found "$(found 'has reviewed')"
+
+scenario "no head at all settles nothing either"
+# HEAD_SHA lost in the plumbing must keep the gate waiting, never open it.
+arr 1 unable-no-files
+expect "exit"        1 "$(HEAD_SHA='' status 3 1)"
+expect "re-requests" 1 "$(edits)"
 
 scenario "an empty marker list restores the old behaviour"
 # The documented way back to the two-class gate: the same body becomes an

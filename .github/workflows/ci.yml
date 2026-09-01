@@ -53,6 +53,12 @@ jobs:
           assert len(markers) >= 2, 'both review formats must stay covered'
           settled = [m.strip() for m in inputs['unable-to-review-markers']['default'].splitlines() if m.strip()]
           assert settled, 'the settled "nothing to review" answer must stay recognised'
+          # Both apostrophes, and the word that tells the settled answer apart
+          # from a transient "was unable to review any files". This list is the
+          # only one that OPENS a merge, so a marker trimmed too far is the one
+          # editing mistake with a merge behind it.
+          assert len(settled) >= 2 and all("able to review any files" in m for m in settled), \
+              'the settled markers must keep both apostrophe spellings'
           # Not decoration either: flipping this default turns a merge gate that
           # passes such a PR into one that blocks it, for everyone on the moving
           # major tag. It is a decision, so it fails here rather than shipping.
@@ -60,7 +66,7 @@ jobs:
               'the unable-to-review default is part of the contract'
           # An input nothing passes through is an input that does nothing.
           env = [s for s in spec['runs']['steps'] if 'run' in s][0]['env']
-          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS'):
+          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS', 'HEAD_SHA'):
               assert var in env, f'{var} never reaches the script'
           print('action.yml OK —', len(markers), 'markers,', len(settled), 'settled markers,',
                 len([r for r in inputs['reviewers']['default'].splitlines() if r.strip()]), 'reviewers')

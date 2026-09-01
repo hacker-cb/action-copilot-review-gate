@@ -100,7 +100,7 @@ Every input has a working default; set one only when you mean to.
 | `reviewers` | two logins | Logins that count as Copilot, one per line. An allowlist, never a prefix. |
 | `review-markers` | two markers | Body substrings that mark a review as genuine, one per line; any one is enough. |
 | `unable-to-review` | `pass` | What a settled "nothing to review" answer does to the gate — `pass` or `fail`. See [below](#when-copilot-has-nothing-to-review). |
-| `unable-to-review-markers` | one marker | Body substrings that mark that settled answer, one per line. Empty turns the class off. |
+| `unable-to-review-markers` | two markers | Body substrings that mark that settled answer, one per line. Empty turns the class off. |
 
 ## What the gate actually checks
 
@@ -114,11 +114,14 @@ later pushes.
 Four cases pass without a review, because requiring one would deadlock: a **draft**
 PR, a **bot-authored** PR (Dependabot and friends — Copilot does not review either),
 a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
-answered it had **nothing reviewable in** — the one of the four you can switch off.
+answered it had **nothing reviewable in** *at the current head* — the one of the four
+you can switch off.
 
-Whichever way a run ends, it writes a one-line verdict to the job summary, so a gate
-that passed *without* a review says so on the run page rather than only in a log
-someone has to scroll.
+Every outcome of the gate itself writes a one-line verdict to the job summary, so a
+gate that passed *without* a review says so on the run page rather than only in a log
+someone has to scroll. The step's preflight — no pull request in the event, a missing
+`gh`/`jq`/`timeout`, a non-numeric input, the hard ceiling firing — runs before that
+script and reports in the log alone.
 
 The `pull-requests: write` scope buys exactly one operation — adding Copilot back as a
 reviewer after it answered without reviewing. The job never checks out your code,
@@ -210,6 +213,15 @@ building. So the gate recognises the answer as its own class and, by default,
 **passes** on it, ending the wait at once instead of spending the window and the
 re-request budget on it.
 
+**For this diff is the whole of it.** The reviews endpoint returns every review a
+pull request ever collected, so an answer given to an empty diff is still sitting
+there after the author pushes real code — and a gate reading it would open before
+Copilot had read a line. The class is therefore pinned to the pull request's
+**current head commit**. The same body against an older one settles nothing: the
+gate says so in the log and goes back to waiting and re-requesting, which is what
+gets Copilot to answer for the commit that is actually there. That pinning is this
+class only; a genuine review still counts on any commit, for the reason above.
+
 Repositories that would rather force a human to look set:
 
 ```yaml
@@ -224,12 +236,14 @@ which keeps the check red — and says why, immediately, instead of after the fu
 Both directions print the body they matched and write the verdict to the job
 summary, so a pull request that merged on this answer is legible after the fact.
 
-The marker itself deliberately starts *after* the apostrophe (`able to review any
-files in this pull request`): Copilot mixes the ASCII and typographic forms inside
-a single body, and a marker carrying one of them stops matching when it emits the
-other. A body no marker covers stays unrecognised and the gate waits, as before —
-the safe direction. Emptying `unable-to-review-markers` turns the class off
-entirely and restores that two-class behaviour.
+This is the one list that can **open** a merge rather than hold it, so its markers
+are the ones to edit carefully. The defaults keep `wasn't`, which is what tells the
+settled answer apart from a transient failure phrased around "was unable to review
+any files" — and carry it twice, once per apostrophe, because Copilot mixes the
+ASCII and typographic forms inside a single body. A body no marker covers stays
+unrecognised and the gate waits, as before — the safe direction. Emptying
+`unable-to-review-markers` turns the class off entirely and restores that two-class
+behaviour.
 
 ## When Copilot changes its review format
 
@@ -280,7 +294,11 @@ suite exists because a hand-written fixture would have kept passing while produc
 broke. A fixture's name declares its verdict — `review-*`, `unable-*` (the settled
 "nothing to review"), `notreview-*` (unrecognised), `ignored-*` (not Copilot) — and
 `tests/classify_test.sh` reads the marker and reviewer defaults out of `action.yml`,
-so editing a default without a fixture to match fails the suite. The
+so editing a default without a fixture to match fails the suite. One envelope field
+is not captured: the settled fixture carries a synthetic `commit_id`, because the
+class is pinned to the head commit and the capture did not keep the real one; both
+suites take their idea of "current head" from that field rather than repeating it.
+The
 closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's own
 input validation, which live in `action.yml` rather than in the script — they read
 that step's `run:` body out of the file (python3 with PyYAML, the dependency CI's contract check already uses) and run

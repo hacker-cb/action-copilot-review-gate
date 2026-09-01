@@ -5,7 +5,8 @@
 #
 #   review-*.json    -> exactly one `review` line
 #   unable-*.json    -> exactly one `unable-to-review` line (Copilot's settled
-#                       "there was nothing here to review")
+#                       "there was nothing here to review"), which it earns only
+#                       while HEAD_SHA is the commit it was left on
 #   notreview-*.json -> exactly one `not-a-review` line (unrecognised: the gate
 #                       keeps waiting and re-requests)
 #   ignored-*.json   -> no output at all (the author is not Copilot)
@@ -43,8 +44,15 @@ UNABLE_MARKERS="$(read_default unable-to-review-markers)"
 [ -n "$MARKERS" ] || { echo "FATAL: could not read the review-markers default out of action.yml"; exit 1; }
 [ -n "$UNABLE_MARKERS" ] || { echo "FATAL: could not read the unable-to-review-markers default out of action.yml"; exit 1; }
 
-classify() { # classify — reviews array on stdin, one verdict line per Copilot review
+# Taken from the fixture rather than written twice: the settled class is pinned to
+# the head commit, so the suite's idea of "current head" IS that fixture's
+# `commit_id`, and a fixture recaptured with another sha keeps working.
+HEAD_SHA="$(jq -r '.commit_id // ""' "$FIXTURES/unable-no-files.json")"
+[ -n "$HEAD_SHA" ] || { echo "FATAL: unable-no-files.json carries no commit_id to pin the settled class to"; exit 1; }
+
+classify() { # classify [head-sha] — reviews array on stdin, one verdict line per review
   REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="$UNABLE_MARKERS" \
+  HEAD_SHA="${1-$HEAD_SHA}" \
     jq -r -f "$ROOT/scripts/classify.jq"
 }
 
@@ -70,10 +78,11 @@ verdict() { # verdict — classifier output on stdin, reduced to one word
   if [ "$lines" = 0 ]; then echo ignored; return; fi
   if [ "$lines" != 1 ]; then echo "$lines lines"; return; fi
   case "$out" in
-    review)             echo review ;;
-    unable-to-review*)  echo unable-to-review ;;
-    not-a-review*)      echo not-a-review ;;
-    *)                  echo unrecognised ;;
+    review)                   echo review ;;
+    unable-to-review*)        echo unable-to-review ;;
+    stale-unable-to-review*)  echo stale-unable-to-review ;;
+    not-a-review*)            echo not-a-review ;;
+    *)                        echo unrecognised ;;
   esac
 }
 
@@ -109,11 +118,29 @@ check "unable-no-files (’)" unable-to-review \
   "$(jq -s '[ .[] | .body |= gsub("\u0027"; "\u2019") ]' "$FIXTURES/unable-no-files.json" \
      | classify | verdict)" ""
 
+# The transient failure the marker must NOT swallow. Same shape, "was unable"
+# rather than "wasn't": a marker trimmed past the apostrophe would match both,
+# and this list is the one that opens a merge rather than holding it.
+echo
+echo "classify.jq — a transient failure phrased around the same words"
+check "\"was unable to review any files\"" not-a-review \
+  "$(jq -s '[ .[] | .body = "Copilot was unable to review any files in this pull request due to an internal error." ]' \
+       "$FIXTURES/unable-no-files.json" | classify | verdict)" ""
+
+# Pinned to the head commit: the same body about an older one settles nothing,
+# because the author may have pushed real code since.
+echo
+echo "classify.jq — the settled answer against another head"
+check "another head is stale" stale-unable-to-review \
+  "$(jq -s '.' "$FIXTURES/unable-no-files.json" | classify "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" | verdict)" ""
+check "no head is stale too" stale-unable-to-review \
+  "$(jq -s '.' "$FIXTURES/unable-no-files.json" | classify "" | verdict)" ""
+
 # Emptying the list turns the class off — the documented way back to the two-class
 # behaviour this gate had before the settled answer had a class of its own.
 check "empty marker list disables it" not-a-review \
   "$(jq -s '.' "$FIXTURES/unable-no-files.json" \
-     | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="" \
+     | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="" HEAD_SHA="$HEAD_SHA" \
        jq -r -f "$ROOT/scripts/classify.jq" | verdict)" ""
 
 # The whole corpus at once — the real shape of an API response, and the case
@@ -130,6 +157,8 @@ check "reviews recognised" "$(count_fixtures review-)" \
   "$(printf '%s\n' "$all" | grep -c '^review$' || true)" ""
 check "settled answers held apart" "$(count_fixtures unable-)" \
   "$(printf '%s\n' "$all" | grep -c '^unable-to-review' || true)" ""
+check "none of them stale" 0 \
+  "$(printf '%s\n' "$all" | grep -c '^stale-unable-to-review' || true)" ""
 check "refusals held" "$(count_fixtures notreview-)" \
   "$(printf '%s\n' "$all" | grep -c '^not-a-review' || true)" ""
 
