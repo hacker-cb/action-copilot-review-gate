@@ -31,8 +31,15 @@ FIXTURES="$HERE/fixtures/reviews"
 read_default() { # read_default <input-name> — that input's default, verbatim
   python3 - "$ROOT/action.yml" "$1" <<'PY'
 import sys, yaml
-spec = yaml.safe_load(open(sys.argv[1]))
-sys.stdout.write(spec['inputs'][sys.argv[2]]['default'])
+# `encoding='utf-8'`, not the locale's: action.yml carries a typographic
+# apostrophe, and Python opens text in the locale encoding — on a machine
+# whose locale is not UTF-8 this suite would die reading the defaults it
+# exists to keep honest.
+spec = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
+# And out through the byte stream, for the same reason: stdout is encoded in
+# the locale's charset too, so a marker carrying U+2019 dies on the way out
+# of a run that read it perfectly well.
+sys.stdout.buffer.write(spec['inputs'][sys.argv[2]]['default'].encode('utf-8'))
 PY
 }
 

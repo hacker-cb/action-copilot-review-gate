@@ -94,11 +94,13 @@ action_step_script() { # action_step_script <path> — write the step's `run:` b
   # PyYAML is the dependency ci.yml's contract check already requires.
   python3 - "$ROOT/action.yml" "$1" <<'PY' || { echo "FATAL: could not read the step's run: body out of action.yml (needs python3 with PyYAML)"; exit 1; }
 import sys, yaml
-spec = yaml.safe_load(open(sys.argv[1]))
+# Explicit on both sides — action.yml carries a typographic apostrophe, and
+# Python's text mode follows the locale rather than the file.
+spec = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 steps = [s for s in spec['runs']['steps'] if 'run' in s]
 if len(steps) != 1:
     sys.exit(f'action.yml has {len(steps)} run steps; this test assumes exactly one')
-open(sys.argv[2], 'w').write(steps[0]['run'])
+open(sys.argv[2], 'w', encoding='utf-8').write(steps[0]['run'])
 PY
 }
 

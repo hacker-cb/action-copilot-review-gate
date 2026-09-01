@@ -42,7 +42,10 @@ jobs:
           # shipping.
           python3 - <<'PY'
           import sys, yaml
-          spec = yaml.safe_load(open('action.yml'))
+          # Explicit encoding: action.yml carries a typographic apostrophe, and
+          # Python reads text in the locale's encoding, which is not UTF-8
+          # everywhere a self-hosted runner might live.
+          spec = yaml.safe_load(open('action.yml', encoding='utf-8'))
           assert spec['runs']['using'] == 'composite', 'must stay a composite action'
           inputs = spec['inputs']
           for name in ('github-token', 'wait-minutes', 'max-rerequests',
