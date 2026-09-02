@@ -235,7 +235,8 @@ request_state() {
   local out
   if out="$(gh api --paginate "repos/$REPO/issues/$PR/timeline?per_page=100" 2>>"$pull_err" \
       | jq -s 'add // []' 2>>"$pull_err" \
-      | REVIEWERS="$REVIEWERS" jq -r -f "$ACTION_PATH/scripts/requested.jq" 2>>"$pull_err")"; then
+      | REVIEWERS="$REVIEWERS" HEAD_SHA="$HEAD_SHA" \
+        jq -r -f "$ACTION_PATH/scripts/requested.jq" 2>>"$pull_err")"; then
     case "$out" in
       pending|absent) printf '%s' "$out"; return 0 ;;
     esac
@@ -482,6 +483,11 @@ while :; do
         # API calls between them take time, and a request sent after the window
         # closed cannot be answered inside this run — it only leaves an orphan
         # review behind a gate that has already failed.
+        # A failed request gives the debounce clock back: `checked_at` was set by
+        # the state read above, so leaving it there would hold the next attempt
+        # for another full HEAD_REQUEST_GRACE — on a short window, one transient
+        # `gh pr edit` failure would spend the whole run without ever asking,
+        # with the budget untouched.
         if [ "$SECONDS" -lt "$deadline" ] && send_rerequest; then
           pending_reported=0
           answered=$refused
@@ -490,6 +496,8 @@ while :; do
           # nothing was ever asked for, one line under the gate saying it asked.
           request_state_seen=pending
           echo "Re-requested a Copilot review of head $HEAD_SHA ($rerequested of $MAX_REREQUESTS) — still waiting."
+        else
+          checked_at=$checked_before
         fi
       fi
     fi

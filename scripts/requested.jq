@@ -7,6 +7,14 @@
 # One environment variable carries the configuration, one entry per line:
 #   REVIEWERS — logins that count as Copilot, the same allowlist classify.jq
 #               matches a review's author against
+# and one that is a single value:
+#   HEAD_SHA  — the pull request's current head commit. Only a review OF THAT
+#               COMMIT answers a request for it: pushes and reviews overlap, and
+#               a review of the previous head landing after the new head's
+#               request answers nothing about the new one. Empty means "count any
+#               review", which is what the filter did before the distinction
+#               existed and is only reachable outside the head-aware gate — it
+#               refuses to start without a head.
 #
 # This is what the head-aware gate consults instead of re-requesting on a timer.
 # `pending` means a review is on its way and asking again would only produce a
@@ -25,16 +33,19 @@
 # for, not yet answered" through the whole of that window.
 #
 # The test is an ORDER, not a presence: the latest review request for Copilot has
-# to be newer than Copilot's latest review. That is what makes it work for the
-# second push as well as the first — the previous head's review is on the record
-# forever, and only the request that came after it means anything. A
+# to come after Copilot's latest answer for this head. That is what makes it work
+# for the second push as well as the first — the previous head's review is on the
+# record forever, and only a request after it means anything. A
 # `review_request_removed` after that request cancels it, which is Copilot
 # declining rather than a review still coming.
 #
-# Timestamps compare as strings because the API's own form is
-# `YYYY-MM-DDTHH:MM:SSZ` — fixed width, UTC, zero-padded — so lexicographic order
-# IS chronological order. `""` sorts below every real timestamp, which is what
-# makes "no review yet" and "no removal" fall out of the same comparison.
+# ORDER MEASURED BY POSITION, not by timestamp. The timeline arrives in
+# chronological order, and its timestamps carry only seconds — so a refusal and
+# the replacement request the gate makes on reading it can share one, and a
+# strict `>` on equal timestamps reports "nothing outstanding" for a request that
+# is plainly later in the list. Positions cannot tie. `-1` stands for "no such
+# event", which is what makes "no review yet" and "no removal" fall out of the
+# same comparison.
 #
 # THE ALLOWLIST HAS TO KEEP EVERY SPELLING. Copilot is `Copilot` on this surface —
 # both as the requested reviewer and as the author of a `reviewed` event — while
@@ -62,18 +73,24 @@ def is_copilot($who):
 # `.` is at the call site — here the whole array — so the filter would run against
 # that instead of against each event, produce an empty stream, and take the call
 # with it. Without the `$` it is a closure, applied per element as intended.
-def latest(f): [ .[] | f ] | map(select(. != null and . != "")) | sort | last // "";
+def last_index(f): [ to_entries[] | select(.value | f) | .key ] | last // -1;
 
-. as $timeline
-| ($timeline | latest(
-    select((.event? // "") == "reviewed" and is_copilot(.user? // {})) | .submitted_at?)) as $reviewed
-| ($timeline | latest(
-    select((.event? // "") == "review_requested"
-           and is_copilot(.requested_reviewer? // {})) | .created_at?)) as $requested
-| ($timeline | latest(
-    select((.event? // "") == "review_request_removed"
-           and is_copilot(.requested_reviewer? // {})) | .created_at?)) as $removed
-| if $requested != "" and $requested > $reviewed and $requested > $removed
+((env.HEAD_SHA // "") | ascii_downcase) as $head
+# An ANSWER to a request for this head: a review of this head, whatever it says.
+# A refusal is a review record like any other, which is how the gate gets to stop
+# guessing which answer went with which request — and a review of some other
+# commit is not an answer for this one, however recently it arrived.
+| last_index(
+    (.event? // "") == "reviewed"
+    and is_copilot(.user? // {})
+    and ($head == "" or (((.commit_id? // "") | ascii_downcase) == $head))) as $answered
+| last_index(
+    (.event? // "") == "review_requested"
+    and is_copilot(.requested_reviewer? // {})) as $requested
+| last_index(
+    (.event? // "") == "review_request_removed"
+    and is_copilot(.requested_reviewer? // {})) as $removed
+| if $requested >= 0 and $requested > $answered and $requested > $removed
   then "pending"
   else "absent"
   end

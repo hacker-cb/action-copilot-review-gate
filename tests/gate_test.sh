@@ -113,12 +113,17 @@ pending() {
 # nothing is outstanding. A refusal is a review record like any other, which is
 # how the timeline dates one against the request that produced it.
 answered_request() {
-  jq -n '[{ event: "review_requested",
-            created_at: "2026-01-01T00:00:00Z",
-            requested_reviewer: { login: "Copilot", type: "Bot" } },
-          { event: "reviewed",
-            submitted_at: "2026-01-01T00:05:00Z",
-            user: { login: "Copilot", type: "Bot" } }]' \
+  # The review carries the head it was left on, because only a review OF THE HEAD
+  # answers a request for it: a review of the previous head landing after the new
+  # head's request answers nothing about the new one.
+  jq -n --arg head "${HEAD_SHA-$HEAD_SHA_DEFAULT}" \
+     '[{ event: "review_requested",
+         created_at: "2026-01-01T00:00:00Z",
+         requested_reviewer: { login: "Copilot", type: "Bot" } },
+       { event: "reviewed",
+         submitted_at: "2026-01-01T00:05:00Z",
+         commit_id: $head,
+         user: { login: "Copilot", type: "Bot" } }]' \
     > "$MOCK_DIR/timeline.json"
 }
 status()  { local rc=0; run_gate "$@" || rc=$?; echo "$rc"; }
