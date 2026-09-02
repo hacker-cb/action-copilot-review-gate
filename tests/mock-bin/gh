@@ -94,12 +94,13 @@ case "${1:-}" in
         if body="$(nth reviews json "$n")"; then cat "$body"; else echo '[]'; fi
         ;;
       *)
-        # `gh api repos/<owner>/<repo>/pulls/<n>` — the pull request object, and
-        # two callers want different parts of it: the closing state check asks
-        # with `--jq .state`, while the head-aware gate pipes the whole object
-        # into scripts/requested.jq. So the object is built and the filter, when
-        # there is one, is applied to it — rather than each caller getting a
-        # different hand-written answer.
+        # `gh api repos/<owner>/<repo>/pulls/<n>` — the pull request object, which
+        # one caller wants: the closing state check, asking with `--jq .state`.
+        # The head-aware gate's request check is NOT here; it reads the timeline
+        # branch above, because GitHub clears `requested_reviewers` while the
+        # review is still being written. The object is built and the filter, when
+        # there is one, applied to it, rather than hand-writing an answer per
+        # caller.
         n=$(( $(count "$MOCK_DIR/calls.pull") + 1 ))
         echo "pull $n" >> "$MOCK_DIR/calls.pull"
         echo pull >> "$MOCK_DIR/calls.order"

@@ -109,6 +109,18 @@ pending() {
             requested_reviewer: { login: "Copilot", type: "Bot" } }]' \
     > "$MOCK_DIR/timeline.json"
 }
+# The same request, already answered: Copilot reviewed AFTER it was asked, so
+# nothing is outstanding. A refusal is a review record like any other, which is
+# how the timeline dates one against the request that produced it.
+answered_request() {
+  jq -n '[{ event: "review_requested",
+            created_at: "2026-01-01T00:00:00Z",
+            requested_reviewer: { login: "Copilot", type: "Bot" } },
+          { event: "reviewed",
+            submitted_at: "2026-01-01T00:05:00Z",
+            user: { login: "Copilot", type: "Bot" } }]' \
+    > "$MOCK_DIR/timeline.json"
+}
 status()  { local rc=0; run_gate "$@" || rc=$?; echo "$rc"; }
 
 # The hard ceiling lives in action.yml, not in gate.sh, so the scenarios at the
@@ -399,59 +411,24 @@ expect "re-requests" 0  "$(edits)"
 expect "state reads bounded" ok \
   "$([ "$(state_reads)" -le 3 ] && echo ok || echo "$(state_reads) reads")"
 
-scenario "a refusal arriving during the run outranks a pending request"
-# The mode's one assumption is that GitHub clears the request when Copilot
-# answers. Where it does not, a refusal sitting beside a pending request would
-# have the gate wait out the whole window for a review nobody is writing — so the
-# refusal, which is proof the request was consumed, wins. It has to ARRIVE during
-# the run to say that, which is what the second poll here is.
-arr 1
-arr 2 notreview-backend-error
-pending
-expect "exit"        1     "$(REQUIRE_HEAD_REVIEW=true status 4 1)"
-expect "re-requests" 1     "$(edits)"
-
-scenario "a refusal about an earlier head does not"
-# The reviews endpoint returns everything the pull request ever collected, while
-# `answered` starts at zero every run — so a refusal answering some previous head
-# would read as fresh on the very first poll and override a perfectly good pending
-# request. That is the duplicate review this mode exists to prevent, produced by
-# the mechanism meant to prevent it. Written off BY COMMIT, so the fixture is
-# moved off the head rather than merely being there first.
-jq -s '[ .[] | .commit_id = "1111111111111111111111111111111111111111" ]' \
-  "$FIXTURES/notreview-backend-error.json" > "$MOCK_DIR/reviews.1.json"
-pending
-expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
-expect "re-requests" 0 "$(edits)"
-
-scenario "a refusal about the head itself always does"
-# The other side of that write-off, and the case that decides it has to be by
-# commit: a job re-run after Copilot refused THIS head sees the refusal on its
-# very first poll. Read as merely old, it would leave the run waiting out its
-# whole window on a request that has already been answered.
+scenario "a refusal answered after the request frees the gate to ask"
+# A refusal is a review record like any other, so the timeline dates it against
+# the request: answered after it, the request is no longer outstanding and the
+# gate is free to ask again — without any count-based guess about which answer
+# went with which request.
 arr 1 notreview-backend-error
-pending
+answered_request
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "re-requests" 1 "$(edits)"
 
-scenario "one head refusal buys one request, not one per check"
-# It stays on the pull request for the rest of the run, so a condition reading it
-# alone would spend the whole budget on the single answer that triggered it —
-# every check, for as long as the window lasts.
+scenario "and a request made after the refusal holds it"
+# The other order, which is what a re-run of a job that already answered that
+# refusal looks like: the request is the newer of the two, so a review is on its
+# way and asking again would only duplicate it. The gate that guessed from counts
+# instead of dates got exactly this case wrong.
 arr 1 notreview-backend-error
 pending
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 6 1)"
-expect "re-requests" 1 "$(edits)"
-
-scenario "a stale refusal arriving mid-run does not override either"
-# The write-off is by commit and not by arrival, so a body about an older commit
-# landing while a current request is pending must move nothing: it answers a
-# request that is long gone.
-arr 1
-jq -s '[ .[] | .commit_id = "1111111111111111111111111111111111111111" ]' \
-  "$FIXTURES/notreview-backend-error.json" > "$MOCK_DIR/reviews.2.json"
-pending
-expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 4 1)"
 expect "re-requests" 0 "$(edits)"
 
 scenario "a poll the API refused buys no re-request"

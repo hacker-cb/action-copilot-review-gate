@@ -278,7 +278,6 @@ unknown_reported=0  # whether an unreadable request state was announced
 # and the gate would ask for a review GitHub was still registering.
 checked_at=$SECONDS # when the request state was last read, for HEAD_REQUEST_GRACE
 request_state_seen=""  # the last answer request_state() gave, for the timeout
-answered_head=0     # head refusals a re-request was already sent for
 
 deadline=$(( SECONDS + WAIT_SECONDS ))
 echo "Waiting up to $WAIT_LABEL for a Copilot review of PR #$PR ..."
@@ -341,11 +340,11 @@ while :; do
   # buys the same re-request, which is what gets Copilot to answer for the head
   # that is actually there. `^unable-to-review` does not match it: the anchor is
   # what keeps the two apart.
-  # Split by head like every other class, and for one consumer: the head-aware
-  # branch, which asks again on a refusal about the CURRENT head and must not be
-  # moved by one about any other commit. Either kind keeps the gate waiting, so
-  # `refused` — what the default gate spends its budget on, and what the log
-  # counts — sums them exactly as it always did.
+  # Split by head like every other class, and for one consumer: the timeout dump,
+  # which says whether an unrecognised body was even about the commit being gated.
+  # Either kind keeps the gate waiting, so `refused` — what the default gate
+  # spends its budget on, and what the log counts — sums them exactly as it
+  # always did.
   unrecognised=$(printf '%s\n' "$kinds" | grep -c '^not-a-review' || true)
   stale_unrecognised=$(printf '%s\n' "$kinds" | grep -c '^stale-not-a-review' || true)
   refused=$(( unrecognised + stale_unrecognised + stale ))
@@ -456,38 +455,22 @@ while :; do
     if [ "$state_fresh" = 1 ] && [ "$polled" = 1 ]; then
       # A pending request means a review is on its way, and every push measured
       # took 4-6 min to get one — so the gate waits rather than asking again.
-      # UNLESS Copilot has answered about THIS head without reviewing: such a
-      # refusal is proof that the request it answers was consumed, whatever the
-      # field says, and that is the one reading under which "pending" would wait
-      # out the whole window for a review nobody is writing.
       #
-      # `unrecognised` and not `refused`, and that is the whole of it: the wider
-      # count carries bodies about other commits, which answer requests that are
-      # long gone and say nothing about the one outstanding now — counting those
-      # is how a pull request with any history at all overrides a perfectly good
-      # request on the first poll. `answered_head` then keeps one head refusal
-      # worth one request, rather than one per check for as long as it sits there.
-      #
-      # WHAT THIS CANNOT TELL, and the trade it takes instead. A refusal about
-      # the head says a request was consumed; it does not say WHICH, and nothing
-      # in the reviews or the pull request object dates the outstanding request
-      # against it. So on a re-run of a job that already answered that refusal,
-      # the gate reads it as consuming the request its own earlier run made, and
-      # spends one extra request. Bounded at one per run by `answered_head`, and
-      # taken deliberately: the other reading — never overriding a pending
-      # request — is a gate that waits out its whole window for a review nobody
-      # is writing, and a merge blocked by that is what admin bypasses are built
-      # out of. Dating the two apart needs the issue timeline, which is a
-      # different source and a different change.
-      if [ "$request_state_seen" = pending ] && [ "${unrecognised:-0}" -le "${answered_head:-0}" ]; then
+      # Nothing overrides that here, and nothing needs to. A refusal is a review
+      # record like any other, so the timeline dates it against the request:
+      # answered after the request, it makes `pending` false on its own and this
+      # branch is not the one taken. That is what the request state being read
+      # from the timeline buys — the earlier reading of this gate had to guess at
+      # the order from counts, and guessed wrong on a re-run.
+      if [ "$request_state_seen" = pending ]; then
         if [ "$pending_reported" = 0 ]; then
           echo "A Copilot review of PR #$PR is already requested and has not arrived yet — waiting rather than asking again."
           pending_reported=1
         fi
       # `absent`: nothing will review this head unless the gate asks — the push
       # Copilot chose not to re-review, or the request that went missing.
-      # `unknown`: the pull request object was unreachable, so a pending request
-      # cannot be ruled IN. Asking anyway is the bounded mistake — `max-rerequests`
+      # `unknown`: the timeline was unreachable, so a pending request cannot be
+      # ruled IN. Asking anyway is the bounded mistake — `max-rerequests`
       # caps the duplicates, while not asking risks failing a merge over a request
       # nobody ever made.
       else
@@ -502,7 +485,6 @@ while :; do
         if [ "$SECONDS" -lt "$deadline" ] && send_rerequest; then
           pending_reported=0
           answered=$refused
-          answered_head=$unrecognised
           # The request now IS the pending one, and the closing diagnosis reads
           # this: left at `absent` it would tell whoever failed the merge that
           # nothing was ever asked for, one line under the gate saying it asked.

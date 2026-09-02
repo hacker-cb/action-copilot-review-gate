@@ -93,7 +93,7 @@ Every input has a working default; set one only when you mean to.
 
 | Input | Default | What it does |
 |---|---|---|
-| `github-token` | `${{ github.token }}` | Reads the PR's reviews — and, under `require-head-review`, the PR itself — and re-requests a review. Needs `pull-requests: write`. |
+| `github-token` | `${{ github.token }}` | Reads the PR's reviews — and, under `require-head-review`, its issue timeline — and re-requests a review. Needs `pull-requests: write`. |
 | `wait-minutes` | `15` | How long to wait for the first genuine review before failing closed. The action wraps its own script in `timeout` at this value plus one poll interval plus a two-minute grace — see [Timeouts](#timeouts) for what that ceiling does and does not cover. |
 | `max-rerequests` | `2` | How many times to ask Copilot again after it answers without reviewing — under `require-head-review`, when nothing is pending for the head. Only successful requests count. |
 | `poll-seconds` | `30` | Seconds between polls of the reviews API. Lands in the hard ceiling too, because the loop sleeps after testing its deadline. |
@@ -130,8 +130,8 @@ broken.
 
 The `pull-requests: write` scope buys exactly one WRITE operation — adding Copilot
 back as a reviewer after it answered without reviewing. Everything else it does is a
-read: the pull request's reviews, and under `require-head-review` the pull request
-object, for the review request GitHub records on it. The job never checks out your
+read: the pull request's reviews, its state, and under `require-head-review` its
+issue timeline, where GitHub records the review request. The job never checks out your
 code, never comments, never merges. On a PR from a fork GitHub issues a read-only token
 regardless of what the workflow declares, so the scope grants a fork nothing.
 
@@ -168,17 +168,12 @@ when one is pending, so it never produces the duplicate reviews an unconditional
 registration lag (it files the automatic request 20–90 s after the push completes),
 so a gate that starts inside that window does not ask for a review that was already
 coming — and it doubles as the rate at which the pull request is read at all, which
-is why the extra API call is per debounce rather than per poll. One thing outranks a
-pending request: an answer from Copilot about **this head** that is not a review.
-That is proof the request was consumed, and without it a gate would wait out its
-whole window for a review nobody is writing. The same body about an earlier commit
-does not count — it answers a request that is long gone, and treating it as current
-would spend a request on a review already on its way. What the gate cannot tell is
-*which* request such an answer consumed: nothing it reads dates the outstanding
-request against the refusal. Re-running a job that already answered one therefore
-costs a single extra request — bounded at one per run, and the deliberate side to
-err on, since the other reading is a gate that waits out its window for a review
-nobody is writing.
+is why the extra API call is per debounce rather than per poll.
+
+Copilot answering *without* reviewing — the backend apology — needs no special case
+here: that answer is a review record like any other, so the timeline dates it
+against the request. Answered after the request, nothing is outstanding and the gate
+is free to ask again; asked after the answer, a review is on its way and it waits.
 
 **`max-rerequests: 0` turns that mechanism off**, and with it the only thing standing
 between an un-re-reviewed push and a merge nobody can make without an admin bypass.
