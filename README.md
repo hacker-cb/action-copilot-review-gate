@@ -195,7 +195,10 @@ the request was filed at 14:07:32, work started at 14:08:10, and the review land
 at 14:11:44, so the field read empty for three and a half of those four minutes. A
 gate trusting it would ask again on nearly every run. The check reads the issue
 **timeline** instead, where the request event stays put, and asks an order rather
-than a presence: is Copilot's latest review request newer than its latest review?
+than a presence: does a review request for Copilot come after this head was pushed,
+and after Copilot's last review *of this head*? Order is read from position in the
+timeline rather than from the timestamps, which carry only seconds — a refusal and
+the request made on reading it routinely share one.
 
 **Which head.** The one in the event that started the run
 (`github.event.pull_request.head.sha`) — which is the commit this run publishes its

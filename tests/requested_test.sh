@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 #
 # Tests for scripts/requested.jq — the filter that decides whether Copilot still
-# owes the pull request a review, which is what the head-aware gate consults
-# instead of re-requesting on a timer.
+# owes the pull request a review OF ITS CURRENT HEAD, which is what the head-aware
+# gate consults instead of re-requesting on a timer.
 #
-# The fixture is a REAL timeline, captured from this repository's pull request #6,
-# and it is the whole reason this suite exists: the obvious field for this question
-# — the pull request's `requested_reviewers` — is empty for most of the wait,
-# because GitHub clears it when Copilot STARTS reviewing rather than when it
-# finishes. A filter written against that field passes every mock a suite can
-# invent and then asks for a duplicate review on every real run. What the capture
-# pins is the shape the answer actually arrives in.
+# The fixture is a REAL timeline, captured from this repository's own pull request
+# #6: four rounds of push -> request -> review, with the commits, logins and
+# timestamps GitHub actually produced. That capture is the point rather than a
+# convenience. The obvious field for this question — the pull request's
+# `requested_reviewers` — is empty for most of the wait, because GitHub clears it
+# when Copilot STARTS reviewing rather than when it finishes; a filter written
+# against it passes every mock a suite can invent and then asks for a duplicate
+# review on every real run, which is exactly what happened before this capture
+# existed.
 #
-# Everything derived from that fixture is derived, never re-typed: a recapture with
-# other timestamps keeps working.
+# Everything below is derived from the fixture, never re-typed: a recapture keeps
+# working, and a scenario cannot quietly drift from the shape the API sends.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
-FIXTURE="$HERE/fixtures/timeline/requested-then-reviewed.json"
+FIXTURE="$HERE/fixtures/timeline/pushes-requests-reviews.json"
 
 # The reviewer allowlist, read out of action.yml so that narrowing the shipped
 # default without a fixture to match fails here rather than shipping — this filter
@@ -33,69 +35,112 @@ PY
 )"
 [ -n "$REVIEWERS" ] || { echo "FATAL: could not read the reviewers default out of action.yml"; exit 1; }
 
+# The fixture's last push — the head every scenario is about unless it says
+# otherwise — and the one before it, for the overlapping-push cases.
+HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$FIXTURE")"
+PREV="$(jq -r '[ .[] | select(.event == "committed") ] | .[-2] | .sha' "$FIXTURE")"
+[ -n "$HEAD" ] && [ -n "$PREV" ] \
+  || { echo "FATAL: the fixture needs at least two pushes"; exit 1; }
+# Where the last round's request sits, so every cut point below is derived too.
+LAST_REQ="$(jq '[ to_entries[] | select(.value.event == "review_requested") | .key ] | last' "$FIXTURE")"
+MID=$(( LAST_REQ + 1 ))   # the timeline as of "requested, not yet reviewed"
+OTHER=1111111111111111111111111111111111111111
+
 pass=0
 fail=0
 
 check() { # check <name> <expected> <got>
   if [ "$3" = "$2" ]; then
-    printf '  ok    %-44s %s\n' "$1" "$2"; pass=$(( pass + 1 ))
+    printf '  ok    %-46s %s\n' "$1" "$2"; pass=$(( pass + 1 ))
   else
-    printf '  FAIL  %-44s expected %-8s got %s\n' "$1" "$2" "$3"; fail=$(( fail + 1 ))
+    printf '  FAIL  %-46s expected %-8s got %s\n' "$1" "$2" "$3"; fail=$(( fail + 1 ))
   fi
 }
 
-# The head every scenario is about, read off the fixture's own review so a
-# recapture with another sha keeps working.
-HEAD_SHA="$(jq -r '[ .[] | select(.event == "reviewed") | .commit_id ] | last // ""' "$FIXTURE")"
-[ -n "$HEAD_SHA" ] || { echo "FATAL: the fixture carries no reviewed commit to pin to"; exit 1; }
-
 state() { # state [head] — timeline on stdin, one word out
-  REVIEWERS="$REVIEWERS" HEAD_SHA="${1-$HEAD_SHA}" \
+  REVIEWERS="$REVIEWERS" HEAD_SHA="${1-$HEAD}" \
     jq -r -f "$ROOT/scripts/requested.jq" 2>&1
 }
 
+# The fixture as captured ends on an answered request; this cuts it short so a
+# scenario can stand in the middle of a round instead.
+mid_round() { jq --argjson n "$MID" '.[0:$n]' "$FIXTURE"; }
+
 echo "requested.jq — the captured timeline"
-# The request is at 14:07:32 and the review at 14:11:44, so the capture as it
-# stands is the answered state.
-check "request answered by a review" absent "$(state < "$FIXTURE")"
-# The same capture with the review taken out is the state the gate spends most of
-# its wait in — and the state `requested_reviewers` cannot see.
-check "request still outstanding" pending \
-  "$(jq '[ .[] | select(.event != "reviewed") ]' "$FIXTURE" | state)"
+check "the last round, answered"   absent  "$(state < "$FIXTURE")"
+check "the last round, mid-review" pending "$(mid_round | state)"
 
 echo
-echo "requested.jq — it is an order, not a presence"
-# The previous head's review stays on the record forever, so what decides is
-# whether a request came AFTER it — appended to the list, which is where GitHub
-# puts a later event and how this filter reads "after".
-check "a request after the last review" pending \
-  "$(jq '. + [{ event: "review_requested", created_at: "2026-09-03T00:00:00Z",
-        requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" | state)"
-check "a request before it" absent "$(state < "$FIXTURE")"
+echo "requested.jq — the bound that makes it about THIS head"
+# A `review_requested` event names no commit, so the head's own `committed` event
+# is the line it has to fall after. Without that bound the previous push's
+# outstanding request reads as this head's — and since the review that answers it
+# is of the old commit and correctly ignored, the state would stay `pending`
+# forever while the gate sat out its window without ever asking.
+check "a new push with no request yet" absent \
+  "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:10:00Z" } }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+check "and once its request lands"     pending \
+  "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:10:00Z" } },
+              { event: "review_requested", created_at: "2026-09-02T15:10:03Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+
+echo
+echo "requested.jq — an answer is a review OF THE HEAD"
+# Pushes and reviews overlap: a review of the previous head can be submitted after
+# the new head was requested, and it answers nothing about the new one. Reading it
+# as an answer is how a gate asks twice for one commit.
+check "a review of another head answers nothing" pending \
+  "$(jq --arg prev "$PREV" --argjson n "$MID" '(.[0:$n])
+      + [{ event: "reviewed", submitted_at: "2026-09-02T15:00:00Z", commit_id: $prev,
+           user: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" | state)"
+check "a review of this head does"              absent "$(state < "$FIXTURE")"
 
 echo
 echo "requested.jq — a request that was withdrawn"
 # Copilot declining, which is not a review still coming: the gate must be free to
 # ask again rather than waiting out the window.
 check "removal after the request" absent \
-  "$(jq '[ .[] | select(.event != "reviewed") ]
-      + [{ event: "review_request_removed", created_at: "2026-09-03T00:00:00Z",
+  "$(jq --argjson n "$MID" '(.[0:$n])
+      + [{ event: "review_request_removed", created_at: "2026-09-02T15:00:00Z",
            requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" | state)"
 
 echo
+echo "requested.jq — the second-level clock"
+# Timeline timestamps carry no sub-second part, so a refusal and the request the
+# gate makes on reading it can share one. Order in the list breaks the tie; a
+# comparison on timestamps alone would report the later request as answered and
+# buy a duplicate review at the next check.
+tie() { # tie <first-event> <second-event> — a push, then those two, same second
+  jq -n --arg head "$OTHER" --arg a "$1" --arg b "$2" '
+    def ev($kind): if $kind == "reviewed"
+      then { event: "reviewed", submitted_at: "2026-09-02T16:00:05Z",
+             commit_id: $head, user: { login: "Copilot", type: "Bot" } }
+      else { event: "review_requested", created_at: "2026-09-02T16:00:05Z",
+             requested_reviewer: { login: "Copilot", type: "Bot" } } end;
+    [ { event: "committed", sha: $head, committer: { date: "2026-09-02T16:00:00Z" } },
+      ev($a), ev($b) ]'
+}
+check "same second, request last" pending "$(tie reviewed requested | state "$OTHER")"
+check "same second, review last"  absent  "$(tie requested reviewed | state "$OTHER")"
+
+echo
 echo "requested.jq — who counts as Copilot"
-# Same event, wrong actor. Each of these must read `absent`, or a human — or
-# another bot in the Copilot family — could hold the gate's re-request back.
+# Same event, wrong actor. Each must read `absent`, or a human — or another bot in
+# the Copilot family — could hold the gate's re-request back indefinitely.
 check "a human with the login" absent \
-  "$(jq '[ .[] | select(.event == "review_requested") | .requested_reviewer.type = "User" ]' "$FIXTURE" | state)"
-check "a sibling Copilot bot" absent \
-  "$(jq '[ .[] | select(.event == "review_requested")
-          | .requested_reviewer.login = "copilot-swe-agent[bot]" ]' "$FIXTURE" | state)"
+  "$(mid_round | jq 'map(if .event == "review_requested"
+        then .requested_reviewer.type = "User" else . end)' | state)"
+check "a sibling Copilot bot"  absent \
+  "$(mid_round | jq 'map(if .event == "review_requested"
+        then .requested_reviewer.login = "copilot-swe-agent[bot]" else . end)' | state)"
 # And the spelling that must keep working: this surface says `Copilot`, the
 # reviews endpoint says `copilot-pull-request-reviewer[bot]`, and the allowlist
 # read out of action.yml above has to cover both.
-check "the request spelling still matches" pending \
-  "$(jq '[ .[] | select(.event == "review_requested") ]' "$FIXTURE" | state)"
+check "the request spelling still matches" pending "$(mid_round | state)"
 
 echo
 echo "requested.jq — shapes that must not abort the filter"
@@ -109,46 +154,14 @@ check "a null requested_reviewer"  absent \
 check "a review by a deleted user" absent \
   "$(echo '[{"event":"reviewed","submitted_at":"2026-01-01T00:00:00Z","user":null}]' | state)"
 # Position, not timestamp: the event is in the list, so a request was made, and a
-# missing `created_at` does not unmake it. Reading this as `absent` would have the
-# gate ask again for a review already on its way.
+# missing `created_at` does not unmake it.
 check "a request with no timestamp" pending \
-  "$(echo '[{"event":"review_requested","requested_reviewer":{"login":"Copilot","type":"Bot"}}]' | state)"
+  "$(echo '[{"event":"review_requested","requested_reviewer":{"login":"Copilot","type":"Bot"}}]' | state '')"
+# With no head to bound against, every request counts and any review answers —
+# the shape this filter had before the head entered it, and unreachable from the
+# head-aware gate, which refuses to start without a head.
+check "no head at all"              absent "$(state '' < "$FIXTURE")"
 
 echo
-echo "requested.jq — overlapping pushes, and the second-level clock"
-# A review of the PREVIOUS head, submitted after the new head was requested.
-# It answers nothing about the new head, so the request stays outstanding — and
-# reading it as an answer is how a gate asks twice for one commit.
-check "a review of another head answers nothing" pending \
-  "$(jq '[ .[] | select(.event == "review_requested") ]
-      + [{ event: "reviewed", submitted_at: "2026-01-02T00:00:00Z",
-           commit_id: "1111111111111111111111111111111111111111",
-           user: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" | state)"
-# The same two events one second apart in the other order — an answer for THIS
-# head — must read as answered.
-check "a review of this head does" absent \
-  "$(jq --arg h "$HEAD_SHA" '[ .[] | select(.event == "review_requested") ]
-      + [{ event: "reviewed", submitted_at: "2026-01-02T00:00:00Z", commit_id: $h,
-           user: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" | state)"
-# Timeline timestamps carry only seconds, so a refusal and the request the gate
-# makes on reading it can share one. Order in the list is what breaks the tie;
-# a strict comparison on equal timestamps would report the later request as
-# already answered and buy a duplicate at the next check.
-check "same second, request last" pending \
-  "$(jq --arg h "$HEAD_SHA" '[{ event: "reviewed", submitted_at: "2026-01-01T00:00:00Z",
-        commit_id: $h, user: { login: "Copilot", type: "Bot" } },
-      { event: "review_requested", created_at: "2026-01-01T00:00:00Z",
-        requested_reviewer: { login: "Copilot", type: "Bot" } }]' -n | state)"
-check "same second, review last" absent \
-  "$(jq --arg h "$HEAD_SHA" '[{ event: "review_requested", created_at: "2026-01-01T00:00:00Z",
-        requested_reviewer: { login: "Copilot", type: "Bot" } },
-      { event: "reviewed", submitted_at: "2026-01-01T00:00:00Z",
-        commit_id: $h, user: { login: "Copilot", type: "Bot" } }]' -n | state)"
-# With no head to pin to, any review counts — the shape this filter had before
-# the distinction existed, and unreachable from the head-aware gate, which
-# refuses to start without a head.
-check "no head counts any review" absent "$(state '' < "$FIXTURE")"
-
-echo
-echo "passed: $pass, failed: $fail"
+echo "passed: $pass, failed: $fail  (fixture: $(jq 'length' "$FIXTURE") events, $(jq '[ .[] | select(.event == "committed") ] | length' "$FIXTURE") pushes)"
 [ "$fail" = 0 ]

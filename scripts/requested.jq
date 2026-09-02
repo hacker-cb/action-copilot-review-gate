@@ -47,6 +47,16 @@
 # event", which is what makes "no review yet" and "no removal" fall out of the
 # same comparison.
 #
+# THE REQUEST HAS TO BE FOR THIS HEAD, and a `review_requested` event names no
+# commit — so the head's own `committed` event is the line it must fall after.
+# Without that bound, a request left outstanding by the previous push reads as
+# the current head's: the review that eventually answers it is of the old commit
+# and correctly ignored below, so the state would stay `pending` forever and the
+# gate would sit out its window without ever asking for the head it is gating.
+# Position again, and the same reason: the timeline is in order, so "after the
+# push" is "later in the list" — no clock, and nothing to compare across two
+# fields that GitHub fills at different moments.
+#
 # THE ALLOWLIST HAS TO KEEP EVERY SPELLING. Copilot is `Copilot` on this surface —
 # both as the requested reviewer and as the author of a `reviewed` event — while
 # the reviews endpoint spells it `copilot-pull-request-reviewer[bot]`. The shipped
@@ -74,6 +84,8 @@ def is_copilot($who):
 # that instead of against each event, produce an empty stream, and take the call
 # with it. Without the `$` it is a closure, applied per element as intended.
 def last_index(f): [ to_entries[] | select(.value | f) | .key ] | last // -1;
+def last_index_after($after; f):
+  [ to_entries[] | select(.key > $after and (.value | f)) | .key ] | last // -1;
 
 ((env.HEAD_SHA // "") | ascii_downcase) as $head
 # An ANSWER to a request for this head: a review of this head, whatever it says.
@@ -84,10 +96,17 @@ def last_index(f): [ to_entries[] | select(.value | f) | .key ] | last // -1;
     (.event? // "") == "reviewed"
     and is_copilot(.user? // {})
     and ($head == "" or (((.commit_id? // "") | ascii_downcase) == $head))) as $answered
+# Where the head enters the timeline. `-1` when it is not there — an empty
+# HEAD_SHA, or a commit the timeline does not carry — and every request then
+# counts, which is the behaviour this filter had before the bound existed.
 | last_index(
+    (.event? // "") == "committed"
+    and $head != ""
+    and (((.sha? // "") | ascii_downcase) == $head)) as $pushed
+| last_index_after($pushed;
     (.event? // "") == "review_requested"
     and is_copilot(.requested_reviewer? // {})) as $requested
-| last_index(
+| last_index_after($pushed;
     (.event? // "") == "review_request_removed"
     and is_copilot(.requested_reviewer? // {})) as $removed
 | if $requested >= 0 and $requested > $answered and $requested > $removed
