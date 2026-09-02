@@ -88,7 +88,12 @@ inputs:
       Logins that count as Copilot, one per line. An ALLOWLIST, never a
       `copilot` prefix: several apps in the Copilot family carry a login with
       that prefix, and for a merge gate one false match costs a merge. Two
-      spellings because the bot answers to a different one per API surface.
+      spellings because the bot answers to a different one per API surface — the
+      reviews endpoint says `copilot-pull-request-reviewer[bot]`, while the
+      timeline says `Copilot`, both for the review request and for the review
+      event. Under `require-head-review` the second is load-bearing: the
+      outstanding-request check reads that surface, and an allowlist without it
+      answers "nothing pending" forever.
       The account must also be of type `Bot`, which no input can relax.
     required: false
     default: |

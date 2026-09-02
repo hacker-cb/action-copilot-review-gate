@@ -93,5 +93,8 @@ jobs:
       - name: Classification tests
         run: bash tests/classify_test.sh
 
+      - name: Review-request tests
+        run: bash tests/requested_test.sh
+
       - name: Gate tests
         run: bash tests/gate_test.sh

@@ -220,22 +220,28 @@ classify_reviews() {
 }
 
 # Whether Copilot still OWES this pull request a review — `pending`, `absent`, or
-# `unknown` when the pull request object could not be read. Only the head-aware
-# gate asks, at most once per HEAD_REQUEST_GRACE and not at all once the
-# re-request budget is spent: on the default gate it would be an API call per
-# poll to answer a question nothing there acts on.
-# scripts/requested.jq owns what counts as Copilot on that surface, and why the
-# allowlist has to keep both of the bot's logins.
+# `unknown` when the timeline could not be read. Only the head-aware gate asks, at
+# most once per HEAD_REQUEST_GRACE and not at all once the re-request budget is
+# spent: on the default gate it would be an API call per poll to answer a question
+# nothing there acts on.
+#
+# The TIMELINE, and not the pull request's `requested_reviewers`, which is the
+# obvious field and the wrong one: GitHub clears it when Copilot starts the review
+# rather than when it finishes, so it reads empty for most of the wait. Measured
+# on this repository's pull request #6 — requested 14:07:32, work started 14:08:10,
+# review posted 14:11:44. scripts/requested.jq carries the measurement and owns
+# what counts as Copilot on this surface, where the bot has a third spelling again.
 request_state() {
   local out
-  if out="$(gh api "repos/$REPO/pulls/$PR" 2>>"$pull_err" \
+  if out="$(gh api --paginate "repos/$REPO/issues/$PR/timeline?per_page=100" 2>>"$pull_err" \
+      | jq -s 'add // []' 2>>"$pull_err" \
       | REVIEWERS="$REVIEWERS" jq -r -f "$ACTION_PATH/scripts/requested.jq" 2>>"$pull_err")"; then
     case "$out" in
       pending|absent) printf '%s' "$out"; return 0 ;;
     esac
   fi
-  # Never the third answer by accident: an unreadable pull request must not read
-  # as "no request is pending", which is the reading that spends the budget.
+  # Never the third answer by accident: an unreadable timeline must not read as
+  # "no request is pending", which is the reading that spends the budget.
   printf 'unknown'
 }
 
@@ -613,9 +619,9 @@ if [ -s "$api_err" ]; then
 fi
 if [ -s "$pull_err" ]; then
   # Named apart from the reviews poll's, because they fail for different reasons
-  # and only one of them is about this mode: a pull request the gate cannot read
-  # is what turns every request check into `unknown`.
-  echo "Pull-request read errors:"
+  # and only one of them is about this mode: a timeline the gate cannot read is
+  # what turns every request check into `unknown`.
+  echo "Timeline read errors:"
   cat "$pull_err"
 fi
 exit 1

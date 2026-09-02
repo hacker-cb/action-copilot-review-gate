@@ -192,6 +192,16 @@ carries both; an allowlist narrowed to the review author alone makes the check a
 "nothing pending" forever, and the gate then spends its whole budget on requests that
 were already there.
 
+**Where "outstanding" is read from, and where it is not.** The obvious field is the
+pull request's own `requested_reviewers` — and it is the wrong one. GitHub takes
+Copilot off that list when it *starts* the review, not when it posts one: measured
+on this repository's [#6](https://github.com/hacker-cb/action-copilot-review-gate/pull/6),
+the request was filed at 14:07:32, work started at 14:08:10, and the review landed
+at 14:11:44, so the field read empty for three and a half of those four minutes. A
+gate trusting it would ask again on nearly every run. The check reads the issue
+**timeline** instead, where the request event stays put, and asks an order rather
+than a presence: is Copilot's latest review request newer than its latest review?
+
 **Which head.** The one in the event that started the run
 (`github.event.pull_request.head.sha`) — which is the commit this run publishes its
 check on, so the gate answers for exactly the commit its verdict is attached to. A
@@ -386,8 +396,9 @@ repository — the gap that let one format change break the gate everywhere at o
 ## Development
 
 ```bash
-bash tests/classify_test.sh   # review vs settled answer vs refusal, fixture by fixture
-bash tests/gate_test.sh       # the whole loop, against a mock gh
+bash tests/classify_test.sh    # review vs settled answer vs refusal, fixture by fixture
+bash tests/requested_test.sh   # is a Copilot review still outstanding, on a real timeline
+bash tests/gate_test.sh        # the whole loop, against a mock gh
 ```
 
 The review fixtures are **real bodies** captured from live pull requests across four
@@ -411,9 +422,17 @@ Copilot review on an earlier commit and a second on the head, which is exactly t
 case the pinning exists for.
 
 The mock `gh` models one more thing for the head-aware scenarios: a successful
-`--add-reviewer` puts Copilot back on `requested_reviewers`, as GitHub does. Without
-that, a gate asking again every poll would look correct to the suite — and duplicate
-reviews of one commit are the failure that mode exists to avoid producing.
+`--add-reviewer` records the review-request event GitHub records, so the request
+reads as outstanding on the next check. Without that, a gate asking again every poll
+would look correct to the suite — and duplicate reviews of one commit are the failure
+that mode exists to avoid producing.
+
+`tests/requested_test.sh` covers that check against a **real timeline**, captured
+from this repository's own pull request. That capture is the point rather than a
+convenience: the field a reader would reach for first, `requested_reviewers`, is
+empty for most of the wait, and a filter written against it passes every mock a
+suite can invent while asking for a duplicate review on every real run. Only the
+capture says which shape the answer arrives in.
 
 The closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's
 own input validation, which live in `action.yml` rather than in the script — they

@@ -95,13 +95,20 @@ scenario() { MOCK_DIR="$WORK/$1"; mkdir -p "$MOCK_DIR"; echo "  $1"; }
 count()   { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 edits()   { count "$MOCK_DIR/calls.edit"; }
 polls()   { count "$MOCK_DIR/calls.reviews"; }
-# Reads of the pull request object. The head-aware gate reads it at most once per
-# debounce and never once the budget is spent, so a bounded count is an assertion
-# in its own right — and on the default gate the count is zero until the closing
-# state check, which is the read every other scenario makes.
-pulls()   { count "$MOCK_DIR/calls.pull"; }
-# Logins GitHub reports on `requested_reviewers`, one per line.
-pending() { printf '%s\n' "$@" > "$MOCK_DIR/pending"; }
+# Reads of the timeline — the head-aware gate's request-state check. It reads at
+# most once per debounce and never once the budget is spent, so a bounded count is
+# an assertion in its own right, and on the default gate it is always zero.
+state_reads() { count "$MOCK_DIR/calls.timeline"; }
+# An outstanding Copilot review request, in the shape the live API returns it:
+# the timeline event, with no Copilot review after it. `requested_reviewers` is
+# NOT that shape — GitHub clears it when Copilot starts reviewing rather than when
+# it finishes, which is why the gate reads the timeline instead.
+pending() {
+  jq -n '[{ event: "review_requested",
+            created_at: "2026-01-01T00:00:00Z",
+            requested_reviewer: { login: "Copilot", type: "Bot" } }]' \
+    > "$MOCK_DIR/timeline.json"
+}
 status()  { local rc=0; run_gate "$@" || rc=$?; echo "$rc"; }
 
 # The hard ceiling lives in action.yml, not in gate.sh, so the scenarios at the
@@ -304,7 +311,7 @@ expect "re-requests" 0     "$(edits)"
 # reviews, so a poll that turns out to carry the review has already paid for it.
 # One per debounce and none at all on the default gate is what "lazy" means here
 # — a gate reading it every poll would be the thing worth catching.
-expect "PR reads"    1     "$(pulls)"
+expect "state reads" 1     "$(state_reads)"
 expect "names the head" found "$(found 'reviewed the current head')"
 
 scenario "head mode holds a review of an older commit"
@@ -328,9 +335,9 @@ scenario "the default gate still passes on a review of an older commit"
 arr 1 review-new-format-first
 expect "exit"        0 "$(HEAD_SHA=1234567812345678123456781234567812345678 status 3 1)"
 expect "re-requests" 0 "$(edits)"
-# Zero, and this one stays zero: the default gate acts on nothing the pull
-# request object says, so reading it would be a call bought for no question.
-expect "PR reads"    0 "$(pulls)"
+# Zero, and this one stays zero: the default gate acts on nothing the timeline
+# says, so reading it would be a call bought for no question.
+expect "state reads" 0 "$(state_reads)"
 
 scenario "a review of the head outranks the stale one before it"
 # The ordinary shape of a pull request under this mode: the previous push's
@@ -347,7 +354,7 @@ scenario "a pending request buys no re-request"
 # is already on its way is what yields two reviews of one commit, and one of them
 # landing after the merge.
 arr 1
-pending copilot
+pending
 expect "exit"        1     "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "re-requests" 0     "$(edits)"
 expect "says why"    found "$(found 'already requested')"
@@ -386,11 +393,11 @@ scenario "a pending request is not re-read every poll"
 # the closing state check. Bounded rather than exact, because the clock is
 # whole seconds and a busy machine rounds differently.
 arr 1
-pending copilot
+pending
 expect "exit"        1  "$(REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE=3 status 7 1)"
 expect "re-requests" 0  "$(edits)"
-expect "PR reads bounded" ok \
-  "$([ "$(pulls)" -le 4 ] && echo ok || echo "$(pulls) reads")"
+expect "state reads bounded" ok \
+  "$([ "$(state_reads)" -le 3 ] && echo ok || echo "$(state_reads) reads")"
 
 scenario "a refusal arriving during the run outranks a pending request"
 # The mode's one assumption is that GitHub clears the request when Copilot
@@ -400,7 +407,7 @@ scenario "a refusal arriving during the run outranks a pending request"
 # the run to say that, which is what the second poll here is.
 arr 1
 arr 2 notreview-backend-error
-pending copilot
+pending
 expect "exit"        1     "$(REQUIRE_HEAD_REVIEW=true status 4 1)"
 expect "re-requests" 1     "$(edits)"
 
@@ -413,7 +420,7 @@ scenario "a refusal about an earlier head does not"
 # moved off the head rather than merely being there first.
 jq -s '[ .[] | .commit_id = "1111111111111111111111111111111111111111" ]' \
   "$FIXTURES/notreview-backend-error.json" > "$MOCK_DIR/reviews.1.json"
-pending copilot
+pending
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "re-requests" 0 "$(edits)"
 
@@ -423,7 +430,7 @@ scenario "a refusal about the head itself always does"
 # very first poll. Read as merely old, it would leave the run waiting out its
 # whole window on a request that has already been answered.
 arr 1 notreview-backend-error
-pending copilot
+pending
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "re-requests" 1 "$(edits)"
 
@@ -432,7 +439,7 @@ scenario "one head refusal buys one request, not one per check"
 # alone would spend the whole budget on the single answer that triggered it —
 # every check, for as long as the window lasts.
 arr 1 notreview-backend-error
-pending copilot
+pending
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 6 1)"
 expect "re-requests" 1 "$(edits)"
 
@@ -443,7 +450,7 @@ scenario "a stale refusal arriving mid-run does not override either"
 arr 1
 jq -s '[ .[] | .commit_id = "1111111111111111111111111111111111111111" ]' \
   "$FIXTURES/notreview-backend-error.json" > "$MOCK_DIR/reviews.2.json"
-pending copilot
+pending
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 4 1)"
 expect "re-requests" 0 "$(edits)"
 
@@ -465,15 +472,15 @@ scenario "the request state is read before the reviews"
 # and such a review is simply found by the poll that follows.
 arr 1
 expect "exit"        1 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
-expect "first call"  pull    "$(head -1 "$MOCK_DIR/calls.order")"
+expect "first call"  timeline "$(head -1 "$MOCK_DIR/calls.order")"
 expect "second call" reviews "$(sed -n 2p "$MOCK_DIR/calls.order")"
 
-scenario "an unreadable pull request does not read as 'nothing pending'"
+scenario "an unreadable timeline does not read as 'nothing pending'"
 # It reads as UNKNOWN, and the gate asks anyway — bounded by the budget. Not
 # asking would risk failing a merge over a request that had genuinely gone
 # missing, which is the one case a re-request is for.
 arr 1
-printf '1' > "$MOCK_DIR/pull.1.rc"
+printf '1' > "$MOCK_DIR/timeline.1.rc"
 expect "exit"        1     "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 # The BUDGET is what bounds it, and nothing else: while the state stays
 # unreadable every poll is another "cannot rule a request in", so the gate spends
@@ -487,7 +494,7 @@ expect "said once"   1     "$(grep -c 'Could not read whether' "$MOCK_DIR/out" |
 # The line promises an API error below it. The reviews poll truncates its own log
 # every iteration, so a shared file would have the next poll erase exactly what
 # was promised — the read gets a log of its own.
-expect "stderr survives" found "$(found 'Pull-request read errors')"
+expect "stderr survives" found "$(found 'Timeline read errors')"
 
 scenario "a head-mode timeout says nothing was ever pending"
 # The two head-mode timeouts want opposite fixes, and the closing line is what
@@ -544,7 +551,7 @@ scenario "a settled 'nothing to review' passes in head mode too"
 arr 1 unable-no-files
 expect "exit"        0 "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "re-requests" 0 "$(edits)"
-expect "PR reads"    1 "$(pulls)"
+expect "state reads" 1 "$(state_reads)"
 
 scenario "head mode refuses without a head commit"
 # Every review would read as stale, so the gate would sit out its whole window to
@@ -597,9 +604,8 @@ scenario "an inherited SECONDS does not skip the debounce"
 arr 1
 expect "exit"        1 "$(SECONDS=100000 REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE=120 status 3 1)"
 expect "re-requests" 0 "$(edits)"
-# One, and it is the closing state check every run makes — the request state was
-# never read at all, which is the assertion.
-expect "PR reads"    1 "$(pulls)"
+# Zero: the request state was never read at all, which is the assertion.
+expect "state reads" 0 "$(state_reads)"
 
 scenario "a non-numeric grace is refused before the wait"
 # The one number action.yml's preflight does not validate, because it is not an
