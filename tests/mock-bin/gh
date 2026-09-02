@@ -7,12 +7,33 @@
 #   reviews.<n>.rc    optional exit status for that poll (default 0) — a non-zero
 #                     one simulates an unreachable API
 #   edit.<n>.rc       optional exit status for the n-th `pr edit` (default 0)
-#   state             what `gh api repos/.../pulls/N` reports (default "open")
+#   state             the pull request's state (default "open")
+#   pending           logins on the pull request's `requested_reviewers`, one per
+#                     line (default none) — what the head-aware gate reads to
+#                     decide whether Copilot already owes it a review
+#
+#                     THE SHAPE HERE IS THE MOCK'S OWN CLAIM about what GitHub
+#                     returns, which is the one thing these scenarios cannot
+#                     falsify: they would pass just as happily against a filter
+#                     written for a shape the API never sends. What the shape was
+#                     taken from is the live API — a `review_requested` timeline
+#                     entry on this repository's own pull requests carries
+#                     `login: "Copilot"`, `type: "Bot"`, which is why the
+#                     allowlist ships that spelling beside the review author's.
+#   pull.<n>.rc       optional exit status for the n-th read of the pull request
+#                     object (default 0), for the state it cannot be read in
 #
 # and recording what it was asked to do:
 #
 #   calls.reviews     one line per reviews poll
 #   calls.edit        one line per re-request attempt, with its exit status
+#   calls.pull        one line per read of the pull request object — the gate
+#                     reads it at most once per debounce, so a scenario asserts
+#                     on this count that it is bounded rather than per poll
+#   calls.order       every call in order, one word per line, so a scenario can
+#                     assert WHICH came first: the gate reads the request state
+#                     before the reviews on purpose, and that order is what
+#                     closes the race between them
 #
 # Written with explicit `if` rather than `cond && action`: under `set -e` such a
 # list exits non-zero when the condition is false, which kills the mock silently
@@ -56,6 +77,7 @@ case "${1:-}" in
       */reviews*)
         n=$(( $(count "$MOCK_DIR/calls.reviews") + 1 ))
         echo "poll $n" >> "$MOCK_DIR/calls.reviews"
+        echo reviews >> "$MOCK_DIR/calls.order"
         rc="$(rc_for reviews "$n")"
         if [ "$rc" != 0 ]; then
           echo "gh: mock API failure (HTTP 502)" >&2
@@ -64,8 +86,39 @@ case "${1:-}" in
         if body="$(nth reviews json "$n")"; then cat "$body"; else echo '[]'; fi
         ;;
       *)
-        # `gh api repos/<owner>/<repo>/pulls/<n> --jq .state`
-        if [ -f "$MOCK_DIR/state" ]; then cat "$MOCK_DIR/state"; else echo open; fi
+        # `gh api repos/<owner>/<repo>/pulls/<n>` — the pull request object, and
+        # two callers want different parts of it: the closing state check asks
+        # with `--jq .state`, while the head-aware gate pipes the whole object
+        # into scripts/requested.jq. So the object is built and the filter, when
+        # there is one, is applied to it — rather than each caller getting a
+        # different hand-written answer.
+        n=$(( $(count "$MOCK_DIR/calls.pull") + 1 ))
+        echo "pull $n" >> "$MOCK_DIR/calls.pull"
+        echo pull >> "$MOCK_DIR/calls.order"
+        rc="$(rc_for pull "$n")"
+        if [ "$rc" != 0 ]; then
+          echo "gh: mock pull-request API failure (HTTP 502)" >&2
+          exit "$rc"
+        fi
+        state=open
+        if [ -f "$MOCK_DIR/state" ]; then state="$(cat "$MOCK_DIR/state")"; fi
+        pending=""
+        if [ -f "$MOCK_DIR/pending" ]; then pending="$(cat "$MOCK_DIR/pending")"; fi
+        body="$(jq -n --arg state "$state" --arg pending "$pending" '
+          { state: $state,
+            requested_reviewers: ($pending | split("\n") | map(select(length > 0))
+              | map({ login: ., type: "Bot" })) }')"
+        filter=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "--jq" ]; then filter="$arg"; fi
+          prev="$arg"
+        done
+        if [ -n "$filter" ]; then
+          printf '%s' "$body" | jq -r "$filter"
+        else
+          printf '%s\n' "$body"
+        fi
         ;;
     esac
     ;;
@@ -74,10 +127,22 @@ case "${1:-}" in
     n=$(( $(count "$MOCK_DIR/calls.edit") + 1 ))
     rc="$(rc_for edit "$n")"
     echo "edit $n rc=$rc" >> "$MOCK_DIR/calls.edit"
+    echo edit >> "$MOCK_DIR/calls.order"
     if [ "$rc" != 0 ]; then
       echo "gh: mock re-request failure (HTTP 403)" >&2
       exit "$rc"
     fi
+    # A successful request puts the reviewer BACK on the pull request, which is
+    # what the head-aware gate reads to decide it has nothing left to ask for.
+    # Without this the mock would let a scenario spend the whole re-request
+    # budget where the real API answers "already pending" after the first call —
+    # and the duplicate reviews that produces are the thing that mode exists to
+    # stop, so a suite that could not see them would be testing the wrong gate.
+    for arg in "$@"; do
+      case "$arg" in
+        @*) printf '%s\n' "${arg#@}" >> "$MOCK_DIR/pending" ;;
+      esac
+    done
     ;;
   *)
     echo "mock gh: unexpected invocation: $*" >&2
