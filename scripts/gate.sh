@@ -13,13 +13,24 @@
 # review: the gate waits, and re-requests. scripts/classify.jq owns the classes
 # and why they are separate.
 #
-# The gate checks "Copilot has reviewed this PR" (any commit), NOT the current
-# head commit: Copilot's "Review new pushes" does not reliably re-review every
-# push — in particular a push that only applies Copilot's own suggestions gets no
-# fresh review — so gating on the exact head SHA would dead-lock the common
-# "apply the review feedback, then push" case. Gating on first-review-seen closes
-# the real race (auto-merge landing before Copilot's review) without
+# By default the gate checks "Copilot has reviewed this PR" (any commit), NOT the
+# current head commit: Copilot's "Review new pushes" does not reliably re-review
+# every push — in particular a push that only applies Copilot's own suggestions
+# gets no fresh review — so gating on the exact head SHA would dead-lock the
+# common "apply the review feedback, then push" case. Gating on first-review-seen
+# closes the real race (auto-merge landing before Copilot's review) without
 # false-blocking later pushes.
+#
+# `require-head-review: true` opts into the stricter reading: only a review of
+# the head passes. It buys "merge on green" as a MECHANISM rather than as the
+# discipline of whoever drives the merge — a review of the head lands 4-6 min
+# after the push that made it, which is routinely after CI has gone green, so a
+# gate happy with any review merges a head Copilot never looked at. What pays for
+# the dead-lock the paragraph above describes is the re-request: instead of
+# spending its budget on a timer, the head-aware gate asks again only when
+# nothing is pending — which is exactly the push Copilot decided not to
+# re-review — and waits when a request is already outstanding, so it never
+# produces the duplicate reviews an unconditional `--add-reviewer` does.
 #
 # Everything arrives through the environment; see action.yml for the contract.
 
@@ -53,10 +64,29 @@ set -euo pipefail
 # whose whole purpose is choosing a side. Empty now reaches the check and stops
 # the run, which is what every numeric input in action.yml already does with it.
 : "${UNABLE_POLICY=pass}"
-# The commit a settled "nothing to review" has to be about to settle anything.
-# Defaulted, not required — and empty means nothing is ever settled, so a value
-# lost in the plumbing keeps the gate waiting rather than opening it.
+# The commit a settled "nothing to review" — and, under `require-head-review`, a
+# genuine review — has to be about to count. Defaulted, not required, and empty
+# means nothing is ever about the head, so a value lost in the plumbing keeps the
+# gate waiting rather than opening it.
 : "${HEAD_SHA=}"
+# `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: an empty value
+# is what an unset `${{ vars.SOMETHING }}` hands over, and it must reach the check
+# below rather than be rewritten into one of the two answers on the way.
+: "${REQUIRE_HEAD_REVIEW=false}"
+# How long the head-aware gate waits before deciding a review request is missing
+# rather than merely young. GitHub registers the automatic request 20-90 s after
+# the push completes, so a gate that starts inside that window and asks again
+# collects a duplicate review of the same commit — the failure the manual
+# `gh pr edit --add-reviewer` workaround is known for. NOT an input: it describes
+# GitHub's own registration latency, which no repository configures, and
+# action.yml passes it explicitly so that a value in the job's `env:` cannot
+# reach in and turn the debounce off.
+#
+# `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: `:=` would
+# rewrite an EMPTY value to 120 before the check below ever saw it, so the one
+# thing that check exists for — a value that reached the script broken — would be
+# the one thing it could not catch.
+: "${HEAD_REQUEST_GRACE=120}"
 
 # The check's own summary, in one line per outcome. The log says the same thing,
 # but it scrolls, and a gate that PASSED without a review — a draft, a bot author,
@@ -87,6 +117,17 @@ case "$UNABLE_POLICY" in
      exit 1 ;;
 esac
 
+# Checked here for the same reason, and it is the input that decides what the gate
+# is FOR: a typo would otherwise be read as `false` by every test below and the
+# run would quietly deliver the default gate to a repository that asked for the
+# strict one — passing a merge on a review of some older commit.
+case "$REQUIRE_HEAD_REVIEW" in
+  true|false) ;;
+  *) echo "::error::require-head-review must be 'true' or 'false', got '$REQUIRE_HEAD_REVIEW'."
+     summarize "**Copilot review gate** — **failed**: \`require-head-review\` must be \`true\` or \`false\`, got \`$REQUIRE_HEAD_REVIEW\`."
+     exit 1 ;;
+esac
+
 # Copilot does not review drafts or bot-authored PRs (e.g. Dependabot), so
 # requiring its review there would deadlock. Pass the gate at once. Bots are
 # detected by GitHub's account type rather than a login-suffix glob.
@@ -101,15 +142,63 @@ if [ "$AUTHOR_TYPE" = "Bot" ]; then
   exit 0
 fi
 
-# Two separate error logs, because they have opposite lifetimes and one used to
-# eat the other: the poll's stderr is truncated every iteration (only the last
+# The head-aware mode's own preflight, and it belongs BELOW the two exits above
+# rather than beside the policy check: neither a draft nor a bot-authored pull
+# request reaches the wait at all, so a gate failing one of them over a missing
+# head — or annotating every Dependabot run with a dead-lock that cannot happen
+# there — would be reporting on a mode that never ran.
+if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+  # Without a head there is nothing for a review to be OF, so every review would
+  # read as stale and the gate would sit out its whole window to say so. Said
+  # here instead, at once, and said about the plumbing rather than about Copilot:
+  # what is missing is the value this gate was supposed to be handed.
+  if [ -z "$HEAD_SHA" ]; then
+    echo "::error::require-head-review is on, but no head commit reached the gate — nothing can be matched against it. Check that \`github.event.pull_request.head.sha\` is present; this event may not be a \`pull_request\`."
+    summarize "**Copilot review gate** — **failed**: \`require-head-review\` is on but no head commit reached the gate."
+    exit 1
+  fi
+  # The one number action.yml's preflight does not validate, because it is not an
+  # input — but the failure it has is the quiet one every input there is checked
+  # against: a non-numeric value makes the `[ ... -ge ... ]` below return 2, which
+  # `set -e` does not look at inside an `if`, and the whole re-request branch is
+  # then switched off without a word. Under this mode that is the dead-lock.
+  case "$HEAD_REQUEST_GRACE" in ''|*[!0-9]*)
+    echo "::error::HEAD_REQUEST_GRACE must be a whole number of seconds, got '$HEAD_REQUEST_GRACE'."
+    summarize "**Copilot review gate** — **failed**: \`HEAD_REQUEST_GRACE\` must be a whole number, got \`$HEAD_REQUEST_GRACE\`."
+    exit 1 ;;
+  esac
+  # Not fatal, and deliberately not an error: a budget of zero is a legitimate
+  # setting for the default gate, where Copilot's automatic request is the only
+  # one that matters. Under `require-head-review` it removes the very mechanism
+  # that keeps a push Copilot chose not to re-review from dead-locking the merge,
+  # which is worth a line on the run page before it costs someone an admin bypass.
+  if [ "$MAX_REREQUESTS" -lt 1 ]; then
+    echo "::warning::require-head-review is on with max-rerequests: 0. A push Copilot does not re-review on its own — one that only applies its own suggestions, for instance — then has nothing to unblock it, and the gate will fail closed on a pull request nobody can merge without a bypass."
+  fi
+  # The same mechanism, switched off by a different number: the gate holds its
+  # first request for HEAD_REQUEST_GRACE seconds so it does not ask for one
+  # GitHub is still registering, and a window no longer than that grace ends
+  # before the hold does.
+  if [ "$WAIT_SECONDS" -le "$HEAD_REQUEST_GRACE" ]; then
+    echo "::warning::require-head-review is on with a wait window of ${WAIT_SECONDS}s, which is not longer than the ${HEAD_REQUEST_GRACE}s the gate waits before its first re-request — so it will never make one. Raise wait-minutes."
+  fi
+fi
+
+# Three separate error logs, because they have different lifetimes and one used
+# to eat the other: the poll's stderr is truncated every iteration (only the last
 # failure is interesting), while a re-request failure must survive until the
 # timeout prints it. Sharing one file meant a successful poll erased the very
 # error the timeout message promised to show.
+#
+# The pull request read gets the third for exactly that reason. It happens
+# between polls, so writing into the poll's log would have the next poll truncate
+# it — and the timeout's "see the API stderr below" would then point at nothing,
+# which is the failure this separation already exists to prevent.
 api_err="$(mktemp)"
 req_err="$(mktemp)"
+pull_err="$(mktemp)"
 seen_bodies="$(mktemp)"
-trap 'rm -f "$api_err" "$req_err" "$seen_bodies"' EXIT
+trap 'rm -f "$api_err" "$req_err" "$pull_err" "$seen_bodies"' EXIT
 
 # Fetch every review on the PR as one flattened JSON array.
 # --paginate with no --jq gives one array per page; `jq -s add` joins them, so
@@ -121,11 +210,80 @@ fetch_reviews() {
     | jq -s 'add // []' 2>/dev/null
 }
 
+# One poll's verdicts, one line per Copilot review. Non-zero when the poll did
+# not answer at all — which is NOT the same as "no reviews", and the difference
+# decides whether the caller may act on the silence.
+classify_reviews() {
+  local raw kinds
+  raw="$(fetch_reviews)" || return 1
+  [ -n "$raw" ] || return 1
+  kinds="$(printf '%s' "$raw" \
+    | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="$UNABLE_MARKERS" \
+      HEAD_SHA="$HEAD_SHA" \
+      jq -r -f "$ACTION_PATH/scripts/classify.jq" 2>>"$api_err")" || return 1
+  printf '%s' "$kinds"
+}
+
+# Whether Copilot still OWES this pull request a review — `pending`, `absent`, or
+# `unknown` when the timeline could not be read. Only the head-aware gate asks, at
+# most once per HEAD_REQUEST_GRACE and not at all once the re-request budget is
+# spent: on the default gate it would be an API call per poll to answer a question
+# nothing there acts on.
+#
+# The TIMELINE, and not the pull request's `requested_reviewers`, which is the
+# obvious field and the wrong one: GitHub clears it when Copilot starts the review
+# rather than when it finishes, so it reads empty for most of the wait. Measured
+# on this repository's pull request #6 — requested 14:07:32, work started 14:08:10,
+# review posted 14:11:44. scripts/requested.jq carries the measurement and owns
+# what counts as Copilot on this surface, where the bot has a third spelling again.
+request_state() {
+  local out
+  if out="$(gh api --paginate "repos/$REPO/issues/$PR/timeline?per_page=100" 2>>"$pull_err" \
+      | jq -s 'add // []' 2>>"$pull_err" \
+      | REVIEWERS="$REVIEWERS" HEAD_SHA="$HEAD_SHA" \
+        jq -r -f "$ACTION_PATH/scripts/requested.jq" 2>>"$pull_err")"; then
+    case "$out" in
+      pending|absent) printf '%s' "$out"; return 0 ;;
+    esac
+  fi
+  # Never the third answer by accident: an unreadable timeline must not read as
+  # "no request is pending", which is the reading that spends the budget.
+  printf 'unknown'
+}
+
+# Ask Copilot again. Shared by both modes, because what differs between them is
+# WHEN to ask and what to say afterwards — never how. Advances the budget and
+# owns the failure notice; the caller owns the success line and its own
+# bookkeeping. Non-zero means the request did not go through.
+send_rerequest() {
+  if gh pr edit "$PR" --repo "$REPO" --add-reviewer "@copilot" >/dev/null 2>>"$req_err"; then
+    rerequested=$(( rerequested + 1 ))
+    failed_notice=0
+    return 0
+  fi
+  if [ "$failed_notice" = 0 ]; then
+    # Not fatal, and not final: the next poll tries again. Announced once per
+    # run of failures so a persistent one does not flood the log.
+    echo "Could not re-request the review — will retry on the next poll (API error shown at timeout)."
+    failed_notice=1
+  fi
+  return 1
+}
+
 reported=0        # refusals already announced in the log
 stale_reported=0  # stale settled answers already announced
+stale_review_reported=0  # reviews of an older commit already announced
 answered=0        # refusals a re-request was actually SENT for
 rerequested=0     # successful re-requests, against MAX_REREQUESTS
 failed_notice=0   # whether the current run of request failures was announced
+pending_reported=0  # whether the current run of "already requested" was announced
+unknown_reported=0  # whether an unreadable request state was announced
+# `$SECONDS`, not 0: bash imports SECONDS from the environment when a caller
+# exported one, and the counter then starts at that value rather than at zero. A
+# zero here would read as "the grace elapsed long ago" on the very first poll,
+# and the gate would ask for a review GitHub was still registering.
+checked_at=$SECONDS # when the request state was last read, for HEAD_REQUEST_GRACE
+request_state_seen=""  # the last answer request_state() gave, for the timeout
 
 deadline=$(( SECONDS + WAIT_SECONDS ))
 echo "Waiting up to $WAIT_LABEL for a Copilot review of PR #$PR ..."
@@ -134,20 +292,53 @@ echo "Waiting up to $WAIT_LABEL for a Copilot review of PR #$PR ..."
 # again. A plain `while [ $SECONDS -lt $deadline ]` would skip the body entirely
 # when the window is zero, and report a timeout without ever having looked.
 while :; do
-  polled=0
-  kinds=""
-  if raw="$(fetch_reviews)" && [ -n "$raw" ]; then
-    if kinds="$(printf '%s' "$raw" \
-        | REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="$UNABLE_MARKERS" \
-          HEAD_SHA="$HEAD_SHA" \
-          jq -r -f "$ACTION_PATH/scripts/classify.jq" 2>>"$api_err")"; then
-      polled=1
-    else
-      kinds=""
-    fi
+  # The request state is read FIRST, and that order is the whole of what closes
+  # the race: read after the reviews, a review landing between the two shows up
+  # in neither — the poll predates it, and the field it cleared reads as
+  # `absent`, so the gate asks for a review it already has. Read before them, the
+  # reviews are always the newer of the two, and a review that lands in the gap
+  # is simply found by this poll.
+  #
+  # Guarded by the budget and the debounce rather than by anything the poll says,
+  # because both are answerable without it — which is also what keeps the read
+  # lazy: at most one per HEAD_REQUEST_GRACE, and none at all once the budget is
+  # spent or on the default gate, where nothing acts on the answer.
+  state_fresh=0
+  checked_before=$checked_at
+  if [ "$REQUIRE_HEAD_REVIEW" = true ] \
+     && [ "$SECONDS" -lt "$deadline" ] \
+     && [ "${rerequested:-0}" -lt "$MAX_REREQUESTS" ] \
+     && [ $(( SECONDS - checked_at )) -ge "$HEAD_REQUEST_GRACE" ]; then
+    checked_at=$SECONDS
+    request_state_seen="$(request_state)"
+    [ "$request_state_seen" = unknown ] || unknown_reported=0
+    state_fresh=1
   fi
 
-  reviewed=$(printf '%s\n' "$kinds" | grep -c '^review$' || true)
+  polled=0
+  if kinds="$(classify_reviews)"; then polled=1; else kinds=""; fi
+  # A state read the poll then made unusable does not get to start the debounce.
+  # The branch below needs both halves, so one failed reviews call would
+  # otherwise cost a full HEAD_REQUEST_GRACE — two minutes of not asking, bought
+  # by an API hiccup rather than by anything about the request.
+  if [ "$state_fresh" = 1 ] && [ "$polled" = 0 ]; then
+    checked_at=$checked_before
+  fi
+
+  head_reviewed=$(printf '%s\n' "$kinds" | grep -c '^review$' || true)
+  # `^stale-review` cannot match `^review$`, and neither matches
+  # `^stale-unable-to-review`: every anchor here is load-bearing.
+  stale_reviewed=$(printf '%s\n' "$kinds" | grep -c '^stale-review' || true)
+  # WHICH of the two counts is the mode's whole difference. The default gate has
+  # always passed on a review of any commit, and goes on doing so; the head-aware
+  # one counts the head's alone. Everything else below — the settled answer, the
+  # refusals, the timeout — is shared, because a gate that waits waits the same
+  # way whatever it is waiting for.
+  if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+    reviewed=$head_reviewed
+  else
+    reviewed=$(( head_reviewed + stale_reviewed ))
+  fi
   settled=$(printf '%s\n' "$kinds" | grep -c '^unable-to-review' || true)
   stale=$(printf '%s\n' "$kinds" | grep -c '^stale-unable-to-review' || true)
   # A settled answer about an older commit is exactly as informative about the
@@ -155,19 +346,35 @@ while :; do
   # buys the same re-request, which is what gets Copilot to answer for the head
   # that is actually there. `^unable-to-review` does not match it: the anchor is
   # what keeps the two apart.
+  # Split by head like every other class, and for one consumer: the timeout dump,
+  # which says whether an unrecognised body was even about the commit being gated.
+  # Either kind keeps the gate waiting, so `refused` — what the default gate
+  # spends its budget on, and what the log counts — sums them exactly as it
+  # always did.
   unrecognised=$(printf '%s\n' "$kinds" | grep -c '^not-a-review' || true)
-  refused=$(( unrecognised + stale ))
+  stale_unrecognised=$(printf '%s\n' "$kinds" | grep -c '^stale-not-a-review' || true)
+  refused=$(( unrecognised + stale_unrecognised + stale ))
 
   # Only when this poll actually answered. A transient API failure leaves kinds
   # empty, and overwriting here would erase the error replies earlier polls
   # recorded — the timeout would then print no hint that Copilot had answered.
   if [ "$polled" = 1 ]; then
-    printf '%s\n' "$kinds" | grep -e '^not-a-review' -e '^stale-unable-to-review' > "$seen_bodies" || true
+    printf '%s\n' "$kinds" \
+      | grep -e '^not-a-review' -e '^stale-not-a-review' -e '^stale-unable-to-review' \
+             -e '^stale-review' > "$seen_bodies" || true
   fi
 
   if [ "${reviewed:-0}" -gt 0 ]; then
-    echo "Copilot has reviewed PR #$PR — gate passes."
-    summarize "**Copilot review gate** — passed: Copilot reviewed PR #$PR."
+    # The head is named only where it was actually required. On the default gate
+    # the review that passed may well be of an older commit, and printing a head
+    # beside it would claim something the gate never checked.
+    if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+      echo "Copilot has reviewed the current head of PR #$PR ($HEAD_SHA) — gate passes."
+      summarize "**Copilot review gate** — passed: Copilot reviewed the current head of PR #$PR (\`$HEAD_SHA\`)."
+    else
+      echo "Copilot has reviewed PR #$PR — gate passes."
+      summarize "**Copilot review gate** — passed: Copilot reviewed PR #$PR."
+    fi
     exit 0
   fi
 
@@ -213,6 +420,16 @@ while :; do
     fi
     stale_reported=$stale
   fi
+  # Only under `require-head-review`: on the default gate a review of an older
+  # commit is not news, it is the gate passing. Said with the commit, because
+  # which commit it was tells the reader whether this is the ordinary "the review
+  # of the last push has not landed yet" or a branch that was force-pushed away
+  # from under a review that had already arrived.
+  if [ "$REQUIRE_HEAD_REVIEW" = true ] && [ "${stale_reviewed:-0}" -gt "${stale_review_reported:-0}" ]; then
+    echo "Copilot has reviewed PR #$PR, but not its current head ($HEAD_SHA) — the gate keeps waiting for a review of the head:"
+    printf '%s\n' "$kinds" | grep '^stale-review' | sed 's/^stale-review[[:space:]]*/  reviewed instead: /'
+    stale_review_reported=$stale_reviewed
+  fi
 
   # Ask again. That reply is what Copilot sends when its backend failed, and it
   # does not retry on its own — its own review fires no workflow, so nothing else
@@ -225,17 +442,74 @@ while :; do
   # transient `gh pr edit` failure retired the refusal that triggered it: no
   # further reply was coming, so the guard never opened again and the remaining
   # budget went unspent while the gate sat out the whole window.
-  if [ "${refused:-0}" -gt "${answered:-0}" ] && [ "${rerequested:-0}" -lt "$MAX_REREQUESTS" ]; then
-    if gh pr edit "$PR" --repo "$REPO" --add-reviewer "@copilot" >/dev/null 2>>"$req_err"; then
-      rerequested=$(( rerequested + 1 ))
+  #
+  # The head-aware gate asks a different question, so it takes a branch of its
+  # own rather than a condition bolted onto this one. There, EVERY class that
+  # reaches this point is the same absence — an unrecognised body, a settled
+  # answer or a genuine review about an older commit, or no answer at all — and
+  # counting them decides nothing. What decides whether asking again would help
+  # is whether Copilot already owes this pull request a review.
+  if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+    # Both guards, and they answer different questions. `state_fresh` says the
+    # state above was read on THIS poll — the budget or the debounce may have
+    # skipped it, and acting on a state read minutes ago is acting on a request
+    # that has since been answered. `polled` says the reviews were read at all:
+    # with `kinds` empty every count is zero, so a head that HAS been reviewed
+    # looks unreviewed and the state reads `absent` precisely because Copilot was
+    # taken off it when it answered — asking there is the duplicate review this
+    # mode exists to prevent.
+    if [ "$state_fresh" = 1 ] && [ "$polled" = 1 ]; then
+      # A pending request means a review is on its way, and every push measured
+      # took 4-6 min to get one — so the gate waits rather than asking again.
+      #
+      # Nothing overrides that here, and nothing needs to. A refusal is a review
+      # record like any other, so the timeline dates it against the request:
+      # answered after the request, it makes `pending` false on its own and this
+      # branch is not the one taken. That is what the request state being read
+      # from the timeline buys — the earlier reading of this gate had to guess at
+      # the order from counts, and guessed wrong on a re-run.
+      if [ "$request_state_seen" = pending ]; then
+        if [ "$pending_reported" = 0 ]; then
+          echo "A Copilot review of PR #$PR is already requested and has not arrived yet — waiting rather than asking again."
+          pending_reported=1
+        fi
+      # `absent`: nothing will review this head unless the gate asks — the push
+      # Copilot chose not to re-review, or the request that went missing.
+      # `unknown`: the timeline was unreachable, so a pending request cannot be
+      # ruled IN. Asking anyway is the bounded mistake — `max-rerequests`
+      # caps the duplicates, while not asking risks failing a merge over a request
+      # nobody ever made.
+      else
+        if [ "$request_state_seen" = unknown ] && [ "$unknown_reported" = 0 ]; then
+          echo "Could not read whether a Copilot review is already requested on PR #$PR — asking anyway, which the re-request budget bounds (API error shown at timeout)."
+          unknown_reported=1
+        fi
+        # The deadline again, and not because the guard above was wrong: the two
+        # API calls between them take time, and a request sent after the window
+        # closed cannot be answered inside this run — it only leaves an orphan
+        # review behind a gate that has already failed.
+        # A failed request gives the debounce clock back: `checked_at` was set by
+        # the state read above, so leaving it there would hold the next attempt
+        # for another full HEAD_REQUEST_GRACE — on a short window, one transient
+        # `gh pr edit` failure would spend the whole run without ever asking,
+        # with the budget untouched.
+        if [ "$SECONDS" -lt "$deadline" ] && send_rerequest; then
+          pending_reported=0
+          answered=$refused
+          # The request now IS the pending one, and the closing diagnosis reads
+          # this: left at `absent` it would tell whoever failed the merge that
+          # nothing was ever asked for, one line under the gate saying it asked.
+          request_state_seen=pending
+          echo "Re-requested a Copilot review of head $HEAD_SHA ($rerequested of $MAX_REREQUESTS) — still waiting."
+        else
+          checked_at=$checked_before
+        fi
+      fi
+    fi
+  elif [ "${refused:-0}" -gt "${answered:-0}" ] && [ "${rerequested:-0}" -lt "$MAX_REREQUESTS" ]; then
+    if send_rerequest; then
       answered=$refused
-      failed_notice=0
       echo "Re-requested a Copilot review ($rerequested of $MAX_REREQUESTS) — still waiting."
-    elif [ "$failed_notice" = 0 ]; then
-      # Not fatal, and not final: the next poll tries again. Announced once per
-      # run of failures so a persistent one does not flood the log.
-      echo "Could not re-request the review — will retry on the next poll (API error shown at timeout)."
-      failed_notice=1
     fi
   fi
 
@@ -256,20 +530,49 @@ fi
 
 # fail-closed: no review in the window (or the API stayed unreachable) blocks the
 # merge. Surface everything that might explain it.
-echo "::error::Copilot has not reviewed PR #$PR within the timeout (or the GitHub API was unavailable) — gate blocks the merge."
-summarize "**Copilot review gate** — **failed**: no Copilot review of PR #$PR within $WAIT_LABEL."
+if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+  echo "::error::Copilot has not reviewed the current head of PR #$PR ($HEAD_SHA) within the timeout (or the GitHub API was unavailable) — gate blocks the merge."
+  summarize "**Copilot review gate** — **failed**: no Copilot review of PR #$PR's head \`$HEAD_SHA\` within $WAIT_LABEL."
+else
+  echo "::error::Copilot has not reviewed PR #$PR within the timeout (or the GitHub API was unavailable) — gate blocks the merge."
+  summarize "**Copilot review gate** — **failed**: no Copilot review of PR #$PR within $WAIT_LABEL."
+fi
 if [ -s "$seen_bodies" ]; then
   # What DID arrive. Either Copilot kept failing — re-request the review — or its
   # review format changed and the `review-markers` input needs a new entry; these
   # bodies say which. A body that is really the settled "nothing to review" under
   # wording no marker covers lands here too, and `unable-to-review-markers` is
   # then the list wanting the new entry.
-  echo "Copilot posted the following, none of which is a review:"
+  #
+  # Under `require-head-review` a genuine review can be in this list, so the
+  # heading has to name what it was measured against: "none of which is a review"
+  # over a line that IS one would send the reader to edit a marker list that
+  # matched perfectly well.
+  if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+    echo "Copilot posted the following, none of which is a review of head $HEAD_SHA:"
+  else
+    echo "Copilot posted the following, none of which is a review:"
+  fi
   # The marker on the stale ones says only that they were not counted. WHY they
   # were not — an older commit, or no head at all — was said once above, in a
   # branch that knows which of the two it was; repeating a guess here is how a
-  # missing input ends up reading as Copilot's fault.
+  # missing input ends up reading as Copilot's fault. The stale REVIEW carries
+  # its commit rather than a body excerpt, so the marker reads into it: what
+  # follows is what Copilot read instead of the head.
+  # The "older commit" label is printed only under `require-head-review`, where a
+  # head is guaranteed to exist — the preflight refuses the mode without one. On
+  # the default gate HEAD_SHA may legitimately be empty, every refusal is then
+  # classified stale for want of anything to compare against, and a label saying
+  # "about an older commit" would blame Copilot for a comparison that never
+  # happened. There the split means nothing, so neither does the label.
+  if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
+    stale_refusal_label='  (about an older commit) '
+  else
+    stale_refusal_label='  '
+  fi
   sed -e 's/^not-a-review[[:space:]]*/  /' \
+      -e "s/^stale-not-a-review[[:space:]]*/$stale_refusal_label/" \
+      -e 's/^stale-review[[:space:]]*/  (a genuine review, but of commit) /' \
       -e 's/^stale-unable-to-review[[:space:]]*/  (a "nothing to review" answer, not counted) /' "$seen_bodies"
   echo "Markers a body is matched against (any one is enough):"
   printf '%s\n' "$MARKERS" | sed '/^[[:space:]]*$/d; s/^/  /'
@@ -281,6 +584,34 @@ if [ -s "$seen_bodies" ]; then
   fi
 fi
 echo "Re-requests sent: $rerequested of $MAX_REREQUESTS allowed."
+# One last read, because the state the loop left behind can be stale by exactly
+# the thing worth reporting: with the budget spent the loop stops looking, and a
+# successful send set `pending` on purpose — so an answer that arrived afterwards
+# would still be reported as "a review is on its way, raise wait-minutes". One
+# call, once, on a run that has already failed.
+if [ "$REQUIRE_HEAD_REVIEW" = true ] && [ -n "$HEAD_SHA" ]; then
+  request_state_seen="$(request_state)"
+fi
+# Which of the two head-aware failures this was, and they want opposite fixes: a
+# review that was requested and had not landed says the window is too short,
+# while one that was never pending says nothing was going to review this head —
+# check that the ruleset's "Automatically request Copilot code review" is on, and
+# that `max-rerequests` left the gate something to ask with.
+if [ "$REQUIRE_HEAD_REVIEW" = true ] && [ -n "$request_state_seen" ]; then
+  # The failed-request case first, because it is the one the state cannot show:
+  # `absent` is equally what a gate that never managed to ask sees, and sending
+  # that reader to the ruleset would have them fix a setting that was never the
+  # problem. The errors themselves are printed further down.
+  if [ "${rerequested:-0}" = 0 ] && [ -s "$req_err" ]; then
+    echo "No Copilot review was pending, and every attempt to ask for one failed — the re-request errors below are what to read, not the ruleset."
+  else
+    case "$request_state_seen" in
+      pending) echo "A Copilot review was still pending when the window closed — it was asked for and had not arrived; \`wait-minutes\` is the number to raise." ;;
+      absent)  echo "No Copilot review was pending when the gate last looked, so nothing was going to review this head on its own — check that the branch ruleset has \"Automatically request Copilot code review\" enabled." ;;
+      *)       echo "Whether a Copilot review was pending could not be read — see the API stderr below." ;;
+    esac
+  fi
+fi
 if [ -s "$req_err" ]; then
   echo "Re-request errors:"
   cat "$req_err"
@@ -288,5 +619,12 @@ fi
 if [ -s "$api_err" ]; then
   echo "Last reviews-API stderr:"
   cat "$api_err"
+fi
+if [ -s "$pull_err" ]; then
+  # Named apart from the reviews poll's, because they fail for different reasons
+  # and only one of them is about this mode: a timeline the gate cannot read is
+  # what turns every request check into `unknown`.
+  echo "Timeline read errors:"
+  cat "$pull_err"
 fi
 exit 1

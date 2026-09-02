@@ -1,5 +1,6 @@
 {
   "user": { "login": "Copilot", "type": "Bot" },
+  "commit_id": "0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f607182930",
   "state": "COMMENTED",
   "body": "### Changes recommended\n\n<details>\n<summary>PULL REQUEST OVERVIEW</summary>\n\nThe second login spelling the bot answers to, with the marker in a different case. Both sides are lowercased before comparison, so this counts.\n</details>"
 }

@@ -7,12 +7,30 @@
 #   reviews.<n>.rc    optional exit status for that poll (default 0) — a non-zero
 #                     one simulates an unreachable API
 #   edit.<n>.rc       optional exit status for the n-th `pr edit` (default 0)
-#   state             what `gh api repos/.../pulls/N` reports (default "open")
+#   state             the pull request's state (default "open")
+#   timeline.json     the issue timeline the head-aware gate reads to decide
+#                     whether Copilot already owes it a review (default: empty).
+#                     The shape is not this mock's invention — it is the live one,
+#                     captured in tests/fixtures/timeline/, and the `pending`
+#                     helper in gate_test.sh builds from the same event
+#   timeline.<n>.rc   optional exit status for the n-th timeline read (default 0),
+#                     for the state it cannot be read in
+#   pull.<n>.rc       optional exit status for the n-th read of the pull request
+#                     object (default 0)
 #
 # and recording what it was asked to do:
 #
 #   calls.reviews     one line per reviews poll
 #   calls.edit        one line per re-request attempt, with its exit status
+#   calls.pull        one line per read of the pull request object — the closing
+#                     state check, which every run makes exactly once
+#   calls.timeline    one line per read of the timeline — the gate reads it at
+#                     most once per debounce, so a scenario asserts on this count
+#                     that it is bounded rather than per poll
+#   calls.order       every call in order, one word per line, so a scenario can
+#                     assert WHICH came first: the gate reads the request state
+#                     before the reviews on purpose, and that order is what
+#                     closes the race between them
 #
 # Written with explicit `if` rather than `cond && action`: under `set -e` such a
 # list exits non-zero when the condition is false, which kills the mock silently
@@ -53,9 +71,21 @@ case "${1:-}" in
       case "$arg" in repos/*) target="$arg"; break ;; esac
     done
     case "$target" in
+      */timeline*)
+        n=$(( $(count "$MOCK_DIR/calls.timeline") + 1 ))
+        echo "timeline $n" >> "$MOCK_DIR/calls.timeline"
+        echo timeline >> "$MOCK_DIR/calls.order"
+        rc="$(rc_for timeline "$n")"
+        if [ "$rc" != 0 ]; then
+          echo "gh: mock timeline API failure (HTTP 502)" >&2
+          exit "$rc"
+        fi
+        if [ -f "$MOCK_DIR/timeline.json" ]; then cat "$MOCK_DIR/timeline.json"; else echo '[]'; fi
+        ;;
       */reviews*)
         n=$(( $(count "$MOCK_DIR/calls.reviews") + 1 ))
         echo "poll $n" >> "$MOCK_DIR/calls.reviews"
+        echo reviews >> "$MOCK_DIR/calls.order"
         rc="$(rc_for reviews "$n")"
         if [ "$rc" != 0 ]; then
           echo "gh: mock API failure (HTTP 502)" >&2
@@ -64,8 +94,35 @@ case "${1:-}" in
         if body="$(nth reviews json "$n")"; then cat "$body"; else echo '[]'; fi
         ;;
       *)
-        # `gh api repos/<owner>/<repo>/pulls/<n> --jq .state`
-        if [ -f "$MOCK_DIR/state" ]; then cat "$MOCK_DIR/state"; else echo open; fi
+        # `gh api repos/<owner>/<repo>/pulls/<n>` — the pull request object, which
+        # one caller wants: the closing state check, asking with `--jq .state`.
+        # The head-aware gate's request check is NOT here; it reads the timeline
+        # branch above, because GitHub clears `requested_reviewers` while the
+        # review is still being written. The object is built and the filter, when
+        # there is one, applied to it, rather than hand-writing an answer per
+        # caller.
+        n=$(( $(count "$MOCK_DIR/calls.pull") + 1 ))
+        echo "pull $n" >> "$MOCK_DIR/calls.pull"
+        echo pull >> "$MOCK_DIR/calls.order"
+        rc="$(rc_for pull "$n")"
+        if [ "$rc" != 0 ]; then
+          echo "gh: mock pull-request API failure (HTTP 502)" >&2
+          exit "$rc"
+        fi
+        state=open
+        if [ -f "$MOCK_DIR/state" ]; then state="$(cat "$MOCK_DIR/state")"; fi
+        body="$(jq -n --arg state "$state" '{ state: $state }')"
+        filter=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "--jq" ]; then filter="$arg"; fi
+          prev="$arg"
+        done
+        if [ -n "$filter" ]; then
+          printf '%s' "$body" | jq -r "$filter"
+        else
+          printf '%s\n' "$body"
+        fi
         ;;
     esac
     ;;
@@ -74,10 +131,32 @@ case "${1:-}" in
     n=$(( $(count "$MOCK_DIR/calls.edit") + 1 ))
     rc="$(rc_for edit "$n")"
     echo "edit $n rc=$rc" >> "$MOCK_DIR/calls.edit"
+    echo edit >> "$MOCK_DIR/calls.order"
     if [ "$rc" != 0 ]; then
       echo "gh: mock re-request failure (HTTP 403)" >&2
       exit "$rc"
     fi
+    # A successful request records the timeline event GitHub records for it, which
+    # is what the head-aware gate reads to decide it has nothing left to ask for.
+    # Without this the mock would let a scenario spend the whole re-request budget
+    # where the real API answers "already pending" after the first call — and the
+    # duplicate reviews that produces are the thing that mode exists to stop, so a
+    # suite that could not see them would be testing the wrong gate.
+    #
+    # `9999-` so the event sorts after any timestamp a fixture carries: the filter
+    # compares the request against Copilot's last review, and a mock clock racing
+    # a fixture's clock would decide scenarios by the second they ran in.
+    for arg in "$@"; do
+      case "$arg" in
+        @*)
+          jq -n --arg login "${arg#@}" \
+             '[{ event: "review_requested",
+                 created_at: "9999-01-01T00:00:00Z",
+                 requested_reviewer: { login: $login, type: "Bot" } }]' \
+            > "$MOCK_DIR/timeline.json"
+          ;;
+      esac
+    done
     ;;
   *)
     echo "mock gh: unexpected invocation: $*" >&2

@@ -23,6 +23,9 @@ inputs:
     description: >-
       How long to wait for the PR's first genuine Copilot review before failing
       closed. The first review historically lands within ~3.5 min end-to-end.
+      Under `require-head-review` this window has to cover the whole
+      push-to-review cycle rather than a review already in flight — measured at
+      4-6 min typical and 9.2 min worst case, which the default still clears.
       The action wraps its own script in `timeout` at this value plus one poll
       interval plus a two-minute grace, so there is no second number to keep in
       sync. That ceiling is the STEP's, not the job's — a composite action cannot
@@ -35,6 +38,10 @@ inputs:
       How many times to ask Copilot again after it answers without reviewing.
       Bounded on purpose: a backend that is down stays down, and the wait window
       is the real limit anyway. Only successful requests count against it.
+      Under `require-head-review` the budget answers a different question — it is
+      spent when GitHub has no review request outstanding for the head, which is
+      the push Copilot did not re-review, not a reply it sent. Setting it to zero
+      there removes the only thing that unblocks such a push.
     required: false
     default: "2"
 
@@ -46,12 +53,47 @@ inputs:
     required: false
     default: "30"
 
+  require-head-review:
+    description: >-
+      Whether only a review of the pull request's CURRENT HEAD passes the gate.
+      `false` (default) keeps the behaviour every version so far has had: any
+      genuine Copilot review of the pull request clears it, on whatever commit.
+      That is deliberately loose — Copilot does not re-review every push, and a
+      push that only applies its own suggestions typically gets no fresh review,
+      so demanding one would dead-lock a merge nothing can unblock.
+      `true` buys "merge on green" as a MECHANISM instead of as the discipline of
+      whoever drives the merge. The review of a new head lands 4-6 min after the
+      push, which is routinely AFTER the pull request's CI has gone green, so a
+      gate happy with any review merges a head Copilot never looked at — measured
+      at 15 of 44 pull requests in one repository over two days.
+      What pays for the dead-lock above is the re-request, which changes shape
+      here: rather than answering a refusal, the gate asks again only when
+      GitHub has no Copilot review request outstanding on the pull request —
+      which is exactly the push Copilot decided not to re-review — and waits
+      when one is pending, so it never produces the duplicate reviews an
+      unconditional `gh pr edit --add-reviewer` does. `max-rerequests: 0` turns
+      that mechanism off and brings the dead-lock back; the gate warns when the
+      two are set that way.
+      The cost is roughly 4-6 min on a pull request's final push (CI and the
+      review run concurrently, so it is the tail that shows), and `wait-minutes`
+      has to cover the whole push-to-review cycle rather than just the review.
+      Under `true` the `reviewers` allowlist must keep BOTH of Copilot's logins:
+      the outstanding-request check reads the one GitHub files a review request
+      under, which is not the one that authors the review.
+    required: false
+    default: "false"
+
   reviewers:
     description: >-
       Logins that count as Copilot, one per line. An ALLOWLIST, never a
       `copilot` prefix: several apps in the Copilot family carry a login with
       that prefix, and for a merge gate one false match costs a merge. Two
-      spellings because the bot answers to a different one per API surface.
+      spellings because the bot answers to a different one per API surface — the
+      reviews endpoint says `copilot-pull-request-reviewer[bot]`, while the
+      timeline says `Copilot`, both for the review request and for the review
+      event. Under `require-head-review` the second is load-bearing: the
+      outstanding-request check reads that surface, and an allowlist without it
+      answers "nothing pending" forever.
       The account must also be of type `Bot`, which no input can relax.
     required: false
     default: |
@@ -133,6 +175,15 @@ runs:
         UNABLE_POLICY: ${{ inputs.unable-to-review }}
         UNABLE_MARKERS: ${{ inputs.unable-to-review-markers }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REQUIRE_HEAD_REVIEW: ${{ inputs.require-head-review }}
+        # A constant, and an input on purpose is what it is NOT: it describes how
+        # long GitHub takes to register the review request it makes itself
+        # (20-90 s after the push, measured), which no repository configures. It
+        # is passed here rather than left to the script's own default so that a
+        # value in the calling job's `env:` cannot reach in and turn the debounce
+        # off — a step's `env:` wins over the job's, and the script's `:=` default
+        # would not have.
+        HEAD_REQUEST_GRACE: "120"
       # Every value reaches the script through `env:` above — never `${{ }}`
       # interpolated into this body, which would be a script-injection surface.
       run: |

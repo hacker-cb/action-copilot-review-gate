@@ -49,8 +49,9 @@ jobs:
           assert spec['runs']['using'] == 'composite', 'must stay a composite action'
           inputs = spec['inputs']
           for name in ('github-token', 'wait-minutes', 'max-rerequests',
-                       'poll-seconds', 'reviewers', 'review-markers',
-                       'unable-to-review', 'unable-to-review-markers'):
+                       'poll-seconds', 'require-head-review', 'reviewers',
+                       'review-markers', 'unable-to-review',
+                       'unable-to-review-markers'):
               assert name in inputs, f'input {name} disappeared'
           markers = [m.strip() for m in inputs['review-markers']['default'].splitlines() if m.strip()]
           assert len(markers) >= 2, 'both review formats must stay covered'
@@ -69,16 +70,31 @@ jobs:
           # major tag. It is a decision, so it fails here rather than shipping.
           assert inputs['unable-to-review']['default'] == 'pass', \
               'the unable-to-review default is part of the contract'
+          # The same kind of decision, pointing the other way: this default is
+          # what keeps an upgrade on the moving major tag from turning a gate
+          # that passes on any review into one that requires the head's. Opting
+          # in is a repository's call, never a release's.
+          assert inputs['require-head-review']['default'] == 'false', \
+              'require-head-review must stay opt-in'
           # An input nothing passes through is an input that does nothing.
           env = [s for s in spec['runs']['steps'] if 'run' in s][0]['env']
-          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS', 'HEAD_SHA'):
+          for var in ('UNABLE_POLICY', 'UNABLE_MARKERS', 'HEAD_SHA',
+                      'REQUIRE_HEAD_REVIEW', 'HEAD_REQUEST_GRACE'):
               assert var in env, f'{var} never reaches the script'
+          # Passed by the step, not left to the script's own default: a step's
+          # `env:` outranks the job's, which is what stops a calling workflow
+          # from reaching in and turning the request debounce off.
+          assert str(env['HEAD_REQUEST_GRACE']).isdigit(), \
+              'HEAD_REQUEST_GRACE must be a literal number in the step env'
           print('action.yml OK —', len(markers), 'markers,', len(settled), 'settled markers,',
                 len([r for r in inputs['reviewers']['default'].splitlines() if r.strip()]), 'reviewers')
           PY
 
       - name: Classification tests
         run: bash tests/classify_test.sh
+
+      - name: Review-request tests
+        run: bash tests/requested_test.sh
 
       - name: Gate tests
         run: bash tests/gate_test.sh

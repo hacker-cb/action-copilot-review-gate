@@ -93,23 +93,26 @@ Every input has a working default; set one only when you mean to.
 
 | Input | Default | What it does |
 |---|---|---|
-| `github-token` | `${{ github.token }}` | Reads the PR's reviews and re-requests one. Needs `pull-requests: write`. |
+| `github-token` | `${{ github.token }}` | Reads the PR's reviews — and, under `require-head-review`, its issue timeline — and re-requests a review. Needs `pull-requests: write`. |
 | `wait-minutes` | `15` | How long to wait for the first genuine review before failing closed. The action wraps its own script in `timeout` at this value plus one poll interval plus a two-minute grace — see [Timeouts](#timeouts) for what that ceiling does and does not cover. |
-| `max-rerequests` | `2` | How many times to ask Copilot again after it answers without reviewing. Only successful requests count. |
+| `max-rerequests` | `2` | How many times to ask Copilot again after it answers without reviewing — under `require-head-review`, when nothing is pending for the head. Only successful requests count. |
 | `poll-seconds` | `30` | Seconds between polls of the reviews API. Lands in the hard ceiling too, because the loop sleeps after testing its deadline. |
 | `reviewers` | two logins | Logins that count as Copilot, one per line. An allowlist, never a prefix. |
 | `review-markers` | two markers | Body substrings that mark a review as genuine, one per line; any one is enough. |
+| `require-head-review` | `false` | Whether only a review of the pull request's **current head** passes. See [Gating on the current head](#gating-on-the-current-head). |
 | `unable-to-review` | `pass` | What a settled "nothing to review" answer does to the gate — `pass` or `fail`. See [below](#when-copilot-has-nothing-to-review). |
 | `unable-to-review-markers` | two markers | Body substrings that mark that settled answer, one per line. Empty turns the class off. |
 
 ## What the gate actually checks
 
-It gates on **"Copilot has reviewed this PR"** (any commit), not on the current head
-commit. Copilot's "Review new pushes" does not reliably re-review every push — in
-particular a push that only applies Copilot's own suggestions gets no fresh review —
-so gating on the exact head SHA would dead-lock the common "apply the feedback, then
-push" case. Gating on first-review-seen closes the real race without false-blocking
-later pushes.
+By default it gates on **"Copilot has reviewed this PR"** (any commit), not on the
+current head commit. Copilot's "Review new pushes" does not reliably re-review every
+push — in particular a push that only applies Copilot's own suggestions gets no fresh
+review — so gating on the exact head SHA would dead-lock the common "apply the
+feedback, then push" case. Gating on first-review-seen closes the real race without
+false-blocking later pushes. `require-head-review: true` opts into the strict reading
+and pays for that dead-lock a different way — see
+[Gating on the current head](#gating-on-the-current-head).
 
 Four cases pass without a review, because requiring one would deadlock: a **draft**
 PR, a **bot-authored** PR (Dependabot and friends — Copilot does not review either),
@@ -125,10 +128,105 @@ the hard ceiling firing — which runs before the gate script at all, and that s
 own required-variable guards, which fire only when the plumbing between the two is
 broken.
 
-The `pull-requests: write` scope buys exactly one operation — adding Copilot back as a
-reviewer after it answered without reviewing. The job never checks out your code,
-never comments, never merges. On a PR from a fork GitHub issues a read-only token
+The `pull-requests: write` scope buys exactly one WRITE operation — adding Copilot
+back as a reviewer after it answered without reviewing. Everything else it does is a
+read: the pull request's reviews, its state, and under `require-head-review` its
+issue timeline, where GitHub records the review request. The job never checks out your
+code, never comments, never merges. On a PR from a fork GitHub issues a read-only token
 regardless of what the workflow declares, so the scope grants a fork nothing.
+
+## Gating on the current head
+
+The default gate closes the race that made this action necessary — auto-merge landing
+before Copilot has posted anything — but not the one after it. A review of a **new**
+head lands 4–6 minutes after the push that made it, which is routinely *after* that
+pull request's CI has gone green. So "checks green, merge on green" merges a head
+Copilot never looked at, on a gate that is honestly green: it has a review, of an
+earlier commit. Measured over 44 pull requests merged in one repository across two
+days, **15 were merged before the review of their final head arrived** — by 0.3 to
+4.4 minutes.
+
+```yaml
+      - uses: hacker-cb/action-copilot-review-gate@v1
+        with:
+          require-head-review: true
+```
+
+Under this input, only a review whose `commit_id` is the pull request's head passes.
+Anything else — a review of an earlier commit, an unrecognised body, no answer at all
+— keeps the gate waiting inside the same `wait-minutes` / `poll-seconds` budget it
+always had. What it buys is "merge on green" **by mechanism** rather than by the
+discipline of whoever drives the merge, and post-merge orphan reviews stop happening.
+
+**What pays for the dead-lock.** The paragraph above is the reason the default is
+loose: a push Copilot chooses not to re-review would otherwise block forever. Under
+this mode the re-request is what unblocks it, and it changes shape to do so. Instead
+of answering a refusal, the gate asks again only when GitHub has **no Copilot review
+request outstanding** on the pull request — which is exactly that push — and waits
+when one is pending, so it never produces the duplicate reviews an unconditional
+`gh pr edit --add-reviewer` does. A two-minute debounce covers GitHub's own
+registration lag (it files the automatic request 20–90 s after the push completes),
+so a gate that starts inside that window does not ask for a review that was already
+coming — and it doubles as the rate at which the pull request is read at all, which
+is why the extra API call is per debounce rather than per poll.
+
+Copilot answering *without* reviewing — the backend apology — needs no special case
+here: that answer is a review record like any other, so the timeline dates it
+against the request. Answered after the request, nothing is outstanding and the gate
+is free to ask again; asked after the answer, a review is on its way and it waits.
+
+**`max-rerequests: 0` turns that mechanism off**, and with it the only thing standing
+between an un-re-reviewed push and a merge nobody can make without an admin bypass.
+The gate says so in a warning rather than refusing to start, but the pairing is not a
+useful one.
+
+**Keep both Copilot logins in `reviewers`.** The outstanding-request check reads the
+login GitHub files a *review request* under — `Copilot` — which is not the
+`copilot-pull-request-reviewer[bot]` that authors the review. The shipped default
+carries both; an allowlist narrowed to the review author alone makes the check answer
+"nothing pending" forever, and the gate then spends its whole budget on requests that
+were already there.
+
+**Where "outstanding" is read from, and where it is not.** The obvious field is the
+pull request's own `requested_reviewers` — and it is the wrong one. GitHub takes
+Copilot off that list when it *starts* the review, not when it posts one: measured
+on this repository's [#6](https://github.com/hacker-cb/action-copilot-review-gate/pull/6),
+the request was filed at 14:07:32, work started at 14:08:10, and the review landed
+at 14:11:44, so the field read empty for three and a half of those four minutes. A
+gate trusting it would ask again on nearly every run. The check reads the issue
+**timeline** instead, where the request event stays put, and asks an order rather
+than a presence: does a review request for Copilot come after this head was pushed,
+and after Copilot's last review *of this head*? Order is read from position in the
+timeline rather than from the timestamps, which carry only seconds — a refusal and
+the request made on reading it routinely share one.
+
+**Which head.** The one in the event that started the run
+(`github.event.pull_request.head.sha`) — which is the commit this run publishes its
+check on, so the gate answers for exactly the commit its verdict is attached to. A
+push during the wait starts a run of its own; the `concurrency` block in the workflow
+above cancels the older one.
+
+**The cost** is roughly 4–6 minutes on a pull request's final push. CI and the review
+run concurrently, so it is the tail that shows — but `wait-minutes` now has to cover
+the whole push-to-review cycle rather than just a review already in flight. The
+default of 15 clears the measured worst case of 9.2 minutes with room. Where the
+gate has to ask for the review itself, add the two-minute debounce before its first
+request to whatever the review then takes; a window no longer than that debounce
+never reaches a request at all, and the gate says so. If you raise `wait-minutes`,
+raise the job-level `timeout-minutes` with it ([Timeouts](#timeouts)).
+
+**On a pull request from a fork this mode is stricter than it looks.** GitHub issues
+a fork's workflow a read-only token whatever the workflow declares, so the
+re-request cannot be made there — and the re-request is what unblocks a push Copilot
+does not re-review on its own. Such a pull request waits out the window and fails
+closed, which is the safe direction but not a state anything in the run can clear.
+The default gate does not have this problem, because a review of an earlier commit
+already passes it.
+
+**A settled "nothing to review" still passes**, in either mode. That answer was
+already pinned to the head commit for its own reasons
+([below](#when-copilot-has-nothing-to-review)), so it *is* an answer about the head —
+Copilot's final word on the code that is actually there.
 
 ## Timeouts
 
@@ -222,7 +320,9 @@ Copilot had read a line. The class is therefore pinned to the pull request's
 **current head commit**. The same body against an older one settles nothing: the
 gate says so in the log and goes back to waiting and re-requesting, which is what
 gets Copilot to answer for the commit that is actually there. That pinning is this
-class only; a genuine review still counts on any commit, for the reason above.
+class only *by default*; a genuine review still counts on any commit, for the reason
+above, unless [`require-head-review`](#gating-on-the-current-head) extends the same
+rule to it.
 
 **One case deserves `fail` rather than the default.** Copilot answers the same
 sentence when every changed file was hidden from it by **content exclusion**, or
@@ -294,8 +394,9 @@ repository — the gap that let one format change break the gate everywhere at o
 ## Development
 
 ```bash
-bash tests/classify_test.sh   # review vs settled answer vs refusal, fixture by fixture
-bash tests/gate_test.sh       # the whole loop, against a mock gh
+bash tests/classify_test.sh    # review vs settled answer vs refusal, fixture by fixture
+bash tests/requested_test.sh   # is a Copilot review still outstanding, on a real timeline
+bash tests/gate_test.sh        # the whole loop, against a mock gh
 ```
 
 The review fixtures are **real bodies** captured from live pull requests across four
@@ -306,15 +407,30 @@ broke. A fixture's name declares its verdict — `review-*`, `unable-*` (the set
 `tests/classify_test.sh` reads the marker and reviewer defaults out of `action.yml`,
 so editing a default without a fixture to match fails the suite.
 
-One envelope field is not captured. The settled class is pinned to the head commit,
-and the capture did not keep the `commit_id` it came with, so that fixture carries a
-synthetic one and both suites take their idea of "current head" from that field
-rather than repeating it. What the pinning depends on — that a review's `commit_id`
-is the branch commit it was left on, not a merge ref — is not something the fixture
-can show; it was checked against this repository's own pull requests, where
+One envelope field is not captured. Two classes are pinned to the head commit — the
+settled "nothing to review", and under `require-head-review` a genuine review — and
+the capture did not keep the `commit_id` each body came with, so every head-dependent
+fixture carries the same synthetic one and both suites take their idea of "current
+head" from that field rather than repeating it. What the pinning depends on — that a
+review's `commit_id` is the branch commit it was left on, not a merge ref — is not
+something the fixture can show; it was checked against this repository's own pull
+requests, where
 [#1](https://github.com/hacker-cb/action-copilot-review-gate/pull/1) carries one
 Copilot review on an earlier commit and a second on the head, which is exactly the
 case the pinning exists for.
+
+The mock `gh` models one more thing for the head-aware scenarios: a successful
+`--add-reviewer` records the review-request event GitHub records, so the request
+reads as outstanding on the next check. Without that, a gate asking again every poll
+would look correct to the suite — and duplicate reviews of one commit are the failure
+that mode exists to avoid producing.
+
+`tests/requested_test.sh` covers that check against a **real timeline**, captured
+from this repository's own pull request. That capture is the point rather than a
+convenience: the field a reader would reach for first, `requested_reviewers`, is
+empty for most of the wait, and a filter written against it passes every mock a
+suite can invent while asking for a duplicate review on every real run. Only the
+capture says which shape the answer arrives in.
 
 The closing scenarios of `tests/gate_test.sh` cover the hard ceiling and the step's
 own input validation, which live in `action.yml` rather than in the script — they

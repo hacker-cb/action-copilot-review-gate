@@ -3,12 +3,17 @@
 # Classification tests: run scripts/classify.jq over each fixture on its own and
 # check the verdict against what the file name declares.
 #
-#   review-*.json    -> exactly one `review` line
+#   review-*.json    -> exactly one `review` line, which it earns only while
+#                       HEAD_SHA is the commit it was left on — against any other
+#                       head the same body is a `stale-review`, and which of the
+#                       two clears the gate is `require-head-review`'s call
 #   unable-*.json    -> exactly one `unable-to-review` line (Copilot's settled
 #                       "there was nothing here to review"), which it earns only
 #                       while HEAD_SHA is the commit it was left on
 #   notreview-*.json -> exactly one `not-a-review` line (unrecognised: the gate
-#                       keeps waiting and re-requests)
+#                       keeps waiting and re-requests), which like the two above
+#                       is the head's spelling — the same body about another
+#                       commit is `stale-not-a-review`
 #   ignored-*.json   -> no output at all (the author is not Copilot)
 #
 # The three review fixtures and every refusal fixture are REAL bodies, lifted
@@ -51,11 +56,17 @@ UNABLE_MARKERS="$(read_default unable-to-review-markers)"
 [ -n "$MARKERS" ] || { echo "FATAL: could not read the review-markers default out of action.yml"; exit 1; }
 [ -n "$UNABLE_MARKERS" ] || { echo "FATAL: could not read the unable-to-review-markers default out of action.yml"; exit 1; }
 
-# Taken from the fixture rather than written twice: the settled class is pinned to
-# the head commit, so the suite's idea of "current head" IS that fixture's
-# `commit_id`, and a fixture recaptured with another sha keeps working.
+# Taken from the fixture rather than written twice: both head-pinned classes are
+# pinned to the head commit, so the suite's idea of "current head" IS that
+# fixture's `commit_id`, and a fixture recaptured with another sha keeps working.
+# Every fixture whose verdict depends on the head carries the SAME synthetic sha,
+# so one value serves the whole corpus.
 HEAD_SHA="$(jq -r '.commit_id // ""' "$FIXTURES/unable-no-files.json")"
 [ -n "$HEAD_SHA" ] || { echo "FATAL: unable-no-files.json carries no commit_id to pin the settled class to"; exit 1; }
+for f in "$FIXTURES"/review-*.json "$FIXTURES"/notreview-*.json; do
+  [ "$(jq -r '.commit_id // ""' "$f")" = "$HEAD_SHA" ] \
+    || { echo "FATAL: $(basename "$f") is not on the corpus head $HEAD_SHA"; exit 1; }
+done
 
 classify() { # classify [head-sha] — reviews array on stdin, one verdict line per review
   REVIEWERS="$REVIEWERS" MARKERS="$MARKERS" UNABLE_MARKERS="$UNABLE_MARKERS" \
@@ -86,8 +97,10 @@ verdict() { # verdict — classifier output on stdin, reduced to one word
   if [ "$lines" != 1 ]; then echo "$lines lines"; return; fi
   case "$out" in
     review)                   echo review ;;
+    stale-review*)            echo stale-review ;;
     unable-to-review*)        echo unable-to-review ;;
     stale-unable-to-review*)  echo stale-unable-to-review ;;
+    stale-not-a-review*)      echo stale-not-a-review ;;
     not-a-review*)            echo not-a-review ;;
     *)                        echo unrecognised ;;
   esac
@@ -134,6 +147,44 @@ check "\"was unable to review any files\"" not-a-review \
   "$(jq -s '[ .[] | .body = "Copilot was unable to review any files in this pull request due to an internal error." ]' \
        "$FIXTURES/unable-no-files.json" | classify | verdict)" ""
 
+# A genuine review is split the same way, and it is the split `require-head-review`
+# reads: `review` means Copilot read what is on the branch now, `stale-review`
+# means it read something else. The detail on that line is the commit, not a body
+# excerpt — the body of a real review says nothing about why it was not counted.
+echo
+echo "classify.jq — a genuine review against another head"
+check "another head is a stale review" stale-review \
+  "$(jq -s '.' "$FIXTURES/review-new-format-first.json" \
+     | classify "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" | verdict)" ""
+check "no head is a stale review too" stale-review \
+  "$(jq -s '.' "$FIXTURES/review-new-format-first.json" | classify "" | verdict)" ""
+check "and it names the commit" $'stale-review\t'"$HEAD_SHA" \
+  "$(jq -s '.' "$FIXTURES/review-new-format-first.json" \
+     | classify "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")" ""
+# A review record with no commit at all — the field is absent on some responses,
+# and reporting an empty string where the log promises a commit prints nothing.
+check "a review with no commit says so" $'stale-review\t(no commit)' \
+  "$(jq -s '[ .[] | del(.commit_id) ]' "$FIXTURES/review-new-format-first.json" | classify)" ""
+# One line per review, whatever the field contains. The caller counts `^review$`
+# lines, so a commit carrying a newline would print a second line — and a value
+# ending in `review` is one the gate counts as a review of the head. GitHub
+# generates this field, so nothing here is reachable today; the excerpt branch
+# scrubs the same characters for the same reason, and a split protocol is not
+# something an API value gets to decide.
+check "a newline in the commit cannot forge a line" $'stale-review\tbbbb review' \
+  "$(jq -s '[ .[] | .commit_id = "bbbb\nreview" ]' "$FIXTURES/review-new-format-first.json" \
+     | classify "aaaa")" ""
+
+# The unrecognised class is split the same way, and for one consumer: the gate's
+# baseline. Neither spelling passes anything — but a refusal about the CURRENT
+# head is proof that the review request it answers was consumed, while one about
+# an earlier commit says nothing about the request outstanding now.
+echo
+echo "classify.jq — an unrecognised body against another head"
+check "another head is a stale refusal" stale-not-a-review \
+  "$(jq -s '.' "$FIXTURES/notreview-backend-error.json" \
+     | classify "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" | verdict)" ""
+
 # Pinned to the head commit: the same body about an older one settles nothing,
 # because the author may have pushed real code since.
 echo
@@ -175,8 +226,12 @@ check "settled answers held apart" "$(count_fixtures unable-)" \
   "$(printf '%s\n' "$all" | grep -c '^unable-to-review' || true)" ""
 check "none of them stale" 0 \
   "$(printf '%s\n' "$all" | grep -c '^stale-unable-to-review' || true)" ""
+check "no stale reviews either" 0 \
+  "$(printf '%s\n' "$all" | grep -c '^stale-review' || true)" ""
 check "refusals held" "$(count_fixtures notreview-)" \
   "$(printf '%s\n' "$all" | grep -c '^not-a-review' || true)" ""
+check "none of those stale either" 0 \
+  "$(printf '%s\n' "$all" | grep -c '^stale-not-a-review' || true)" ""
 
 echo
 echo "passed: $pass, failed: $fail"
