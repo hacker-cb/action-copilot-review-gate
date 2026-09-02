@@ -527,6 +527,18 @@ expect "exit"       1     "$(REQUIRE_HEAD_REVIEW=true status 3 1)"
 expect "names the errors" found "$(found 'every attempt to ask for one failed')"
 expect "not the ruleset"  lost  "$(found 'check that the branch ruleset')"
 
+scenario "the closing diagnosis reads the state itself"
+# The loop stops looking once the budget is spent — and never looks at all when
+# there is none — while a successful send leaves `pending` set on purpose. Either
+# way the value the diagnosis would inherit is stale by exactly the thing worth
+# reporting, so it takes one read of its own. Here the loop makes none, and the
+# closing line still knows a review was outstanding.
+arr 1
+pending
+expect "exit"        1     "$(MAX_REREQUESTS=0 REQUIRE_HEAD_REVIEW=true status 3 1)"
+expect "state reads" 1     "$(state_reads)"
+expect "diagnosis"   found "$(found 'still pending when the window closed')"
+
 scenario "a settled 'nothing to review' passes in head mode too"
 # It is already pinned to the head, so it IS an answer about the head — the same
 # final word, and re-requesting it stays the provable no-op it always was.
@@ -586,8 +598,10 @@ scenario "an inherited SECONDS does not skip the debounce"
 arr 1
 expect "exit"        1 "$(SECONDS=100000 REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE=120 status 3 1)"
 expect "re-requests" 0 "$(edits)"
-# Zero: the request state was never read at all, which is the assertion.
-expect "state reads" 0 "$(state_reads)"
+# One, and it is the closing diagnosis's own read: the LOOP never looked, which
+# is the assertion — a debounce that had skipped would have read inside it and
+# spent a request off the back of that read.
+expect "state reads" 1 "$(state_reads)"
 
 scenario "a non-numeric grace is refused before the wait"
 # The one number action.yml's preflight does not validate, because it is not an

@@ -39,8 +39,9 @@ PY
 # otherwise — and the one before it, for the overlapping-push cases.
 HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$FIXTURE")"
 PREV="$(jq -r '[ .[] | select(.event == "committed") ] | .[-2] | .sha' "$FIXTURE")"
-[ -n "$HEAD" ] && [ -n "$PREV" ] \
-  || { echo "FATAL: the fixture needs at least two pushes"; exit 1; }
+if [ -z "$HEAD" ] || [ -z "$PREV" ]; then
+  echo "FATAL: the fixture needs at least two pushes"; exit 1
+fi
 # Where the last round's request sits, so every cut point below is derived too.
 LAST_REQ="$(jq '[ to_entries[] | select(.value.event == "review_requested") | .key ] | last' "$FIXTURE")"
 MID=$(( LAST_REQ + 1 ))   # the timeline as of "requested, not yet reviewed"
@@ -85,6 +86,19 @@ check "and once its request lands"     pending \
   "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
                 committer: { date: "2026-09-02T15:10:00Z" } },
               { event: "review_requested", created_at: "2026-09-02T15:10:03Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+
+# A rebase or an amend records `head_ref_force_pushed` INSTEAD of a `committed`
+# for the rewritten head, so a bound reading only the latter finds nothing, lets
+# every historical request count, and hands the gate a `pending` it can never
+# clear — the dead-lock again, by a different route.
+check "a force-pushed head with no request" absent \
+  "$(jq '. + [{ event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:00Z" }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+check "and once its request lands"          pending \
+  "$(jq '. + [{ event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:00Z" },
+              { event: "review_requested", created_at: "2026-09-02T15:20:05Z",
                 requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" \
      | state cafebabecafebabecafebabecafebabecafebabe)"
 

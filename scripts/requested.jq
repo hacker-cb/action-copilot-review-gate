@@ -48,7 +48,11 @@
 # same comparison.
 #
 # THE REQUEST HAS TO BE FOR THIS HEAD, and a `review_requested` event names no
-# commit — so the head's own `committed` event is the line it must fall after.
+# commit — so the point where this head entered the pull request is the line it
+# must fall after. Two events can mark that point: the head's own `committed`,
+# and a `head_ref_force_pushed`, which is what a rebase or an amend records
+# INSTEAD — the rewritten commit may never appear as a `committed` event at all.
+# Taking the later of the two covers both, and covers them in either order.
 # Without that bound, a request left outstanding by the previous push reads as
 # the current head's: the review that eventually answers it is of the old commit
 # and correctly ignored below, so the state would stay `pending` forever and the
@@ -96,13 +100,15 @@ def last_index_after($after; f):
     (.event? // "") == "reviewed"
     and is_copilot(.user? // {})
     and ($head == "" or (((.commit_id? // "") | ascii_downcase) == $head))) as $answered
-# Where the head enters the timeline. `-1` when it is not there — an empty
-# HEAD_SHA, or a commit the timeline does not carry — and every request then
-# counts, which is the behaviour this filter had before the bound existed.
+# Where the head enters the timeline. `-1` when neither marker is there — an
+# empty HEAD_SHA, or a commit the timeline does not carry — and every request
+# then counts, which is the behaviour this filter had before the bound existed.
 | last_index(
     (.event? // "") == "committed"
     and $head != ""
-    and (((.sha? // "") | ascii_downcase) == $head)) as $pushed
+    and (((.sha? // "") | ascii_downcase) == $head)) as $committed_at
+| last_index((.event? // "") == "head_ref_force_pushed") as $forced_at
+| (if $committed_at > $forced_at then $committed_at else $forced_at end) as $pushed
 | last_index_after($pushed;
     (.event? // "") == "review_requested"
     and is_copilot(.requested_reviewer? // {})) as $requested

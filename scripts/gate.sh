@@ -579,6 +579,14 @@ if [ -s "$seen_bodies" ]; then
   fi
 fi
 echo "Re-requests sent: $rerequested of $MAX_REREQUESTS allowed."
+# One last read, because the state the loop left behind can be stale by exactly
+# the thing worth reporting: with the budget spent the loop stops looking, and a
+# successful send set `pending` on purpose — so an answer that arrived afterwards
+# would still be reported as "a review is on its way, raise wait-minutes". One
+# call, once, on a run that has already failed.
+if [ "$REQUIRE_HEAD_REVIEW" = true ] && [ -n "$HEAD_SHA" ]; then
+  request_state_seen="$(request_state)"
+fi
 # Which of the two head-aware failures this was, and they want opposite fixes: a
 # review that was requested and had not landed says the window is too short,
 # while one that was never pending says nothing was going to review this head —
