@@ -175,6 +175,13 @@ check "a request with no timestamp" pending \
 # the shape this filter had before the head entered it, and unreachable from the
 # head-aware gate, which refuses to start without a head.
 check "no head at all"              absent "$(state '' < "$FIXTURE")"
+# And no bound either, force-push included: with no head there is nothing to
+# bound against, so a marker that still cut the list would contradict the line
+# above and hide requests the caller was told would count.
+check "no head, and a force-push"   pending \
+  "$(jq --argjson n "$MID" '(.[0:$n])
+      + [{ event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:00Z" }]' "$FIXTURE" \
+     | state '')"
 
 echo
 echo "passed: $pass, failed: $fail  (fixture: $(jq 'length' "$FIXTURE") events, $(jq '[ .[] | select(.event == "committed") ] | length' "$FIXTURE") pushes)"

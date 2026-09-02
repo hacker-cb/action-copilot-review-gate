@@ -100,14 +100,17 @@ def last_index_after($after; f):
     (.event? // "") == "reviewed"
     and is_copilot(.user? // {})
     and ($head == "" or (((.commit_id? // "") | ascii_downcase) == $head))) as $answered
-# Where the head enters the timeline. `-1` when neither marker is there — an
-# empty HEAD_SHA, or a commit the timeline does not carry — and every request
-# then counts, which is the behaviour this filter had before the bound existed.
+# Where the head enters the timeline. `-1` when neither marker is there, and
+# `-1` unconditionally without a HEAD_SHA — there is no head to bound against
+# then, so every request counts, which is the behaviour this filter had before
+# the bound existed and what its contract above promises. The force-push marker
+# carries the same guard as the commit one for exactly that reason: on its own it
+# would keep bounding a filter that was told not to.
 | last_index(
     (.event? // "") == "committed"
     and $head != ""
     and (((.sha? // "") | ascii_downcase) == $head)) as $committed_at
-| last_index((.event? // "") == "head_ref_force_pushed") as $forced_at
+| last_index((.event? // "") == "head_ref_force_pushed" and $head != "") as $forced_at
 | (if $committed_at > $forced_at then $committed_at else $forced_at end) as $pushed
 | last_index_after($pushed;
     (.event? // "") == "review_requested"
