@@ -81,7 +81,12 @@ set -euo pipefail
 # GitHub's own registration latency, which no repository configures, and
 # action.yml passes it explicitly so that a value in the job's `env:` cannot
 # reach in and turn the debounce off.
-: "${HEAD_REQUEST_GRACE:=120}"
+#
+# `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: `:=` would
+# rewrite an EMPTY value to 120 before the check below ever saw it, so the one
+# thing that check exists for — a value that reached the script broken — would be
+# the one thing it could not catch.
+: "${HEAD_REQUEST_GRACE=120}"
 
 # The check's own summary, in one line per outcome. The log says the same thing,
 # but it scrolls, and a gate that PASSED without a review — a draft, a bot author,

@@ -611,6 +611,10 @@ arr 1
 expect "exit"      1     "$(REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE=abc status 3 1)"
 expect "polls"     0     "$(polls)"
 expect "diagnosis" found "$(found 'HEAD_REQUEST_GRACE must be')"
+# And empty, which `:=` would have rewritten to the default before the check ran
+# — leaving the one value that reached the script broken as the one it could not
+# catch. Same reason `unable-to-review` is defaulted with `=`.
+expect "empty too" 1     "$(REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE='' status 3 1)"
 
 scenario "head mode warns when it has no budget to ask with"
 # Not an error — a budget of zero is legitimate on the default gate — but under
