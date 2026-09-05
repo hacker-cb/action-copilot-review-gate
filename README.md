@@ -168,8 +168,8 @@ this mode the re-request is what unblocks it, and it changes shape to do so. Ins
 of answering a refusal, the gate asks again only when GitHub has **no Copilot review
 request outstanding** on the pull request — which is exactly that push — and waits
 when one is pending, so it never produces the duplicate reviews an unconditional
-`gh pr edit --add-reviewer` does. A two-minute debounce covers GitHub's own
-registration lag — where GitHub files the automatic request it does so within
+`gh pr edit --add-reviewer` does. The two-minute debounce before the first read is not
+a registration lag — where GitHub files the automatic request it does so within
 seconds — but the rate at which the pull request is read at all, which is why the
 extra API call is per debounce rather than per poll.
 

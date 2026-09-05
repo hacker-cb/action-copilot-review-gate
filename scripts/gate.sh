@@ -76,10 +76,10 @@ set -euo pipefail
 # How long the head-aware gate waits before deciding a review request is missing
 # rather than merely young. Not a registration lag — where GitHub files the request
 # it does so within seconds of the push — but the rate at which this gate reads a
-# pull request at all: one timeline call per hold rather than one per poll. NOT an
+# pull request at all: one timeline call per debounce rather than one per poll. NOT an
 # input: how often the gate reads is not a repository's choice, and action.yml
 # passes it explicitly so that a value in the job's `env:` cannot reach in and
-# turn the hold off.
+# turn the debounce off.
 #
 # `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: `:=` would
 # rewrite an EMPTY value to 120 before the check below ever saw it, so the one
@@ -140,7 +140,7 @@ if [ "$IS_DRAFT" = "true" ]; then
 fi
 if [ "$AUTHOR_TYPE" = "Bot" ]; then
   echo "Bot author '$AUTHOR': Copilot is not requested automatically — gate passes."
-  summarize "**Copilot review gate** — passed: bot author \`$AUTHOR\`, which Copilot is not automatically requested on."
+  summarize "**Copilot review gate** — passed: bot author \`$AUTHOR\`, which Copilot is not automatically asked to review."
   exit 0
 fi
 
@@ -179,7 +179,7 @@ if [ "$REQUIRE_HEAD_REVIEW" = true ]; then
   fi
   # The same mechanism, switched off by a different number: the gate holds its
   # first read for HEAD_REQUEST_GRACE seconds, and a window no longer than that
-  # hold ends before the read ever happens.
+  # debounce ends before the read ever happens.
   if [ "$WAIT_SECONDS" -le "$HEAD_REQUEST_GRACE" ]; then
     echo "::warning::require-head-review is on with a wait window of ${WAIT_SECONDS}s, which is not longer than the ${HEAD_REQUEST_GRACE}s the gate waits before its first re-request — so it will never make one. Raise wait-minutes."
   fi
@@ -282,7 +282,7 @@ unknown_reported=0  # whether an unreadable request state was announced
 # `$SECONDS`, not 0: bash imports SECONDS from the environment when a caller
 # exported one, and the counter then starts at that value rather than at zero. A
 # zero here would read as "the grace elapsed long ago" on the very first poll,
-# collapsing the hold to nothing.
+# collapsing the debounce to nothing.
 checked_at=$SECONDS # when the request state was last read, for HEAD_REQUEST_GRACE
 request_state_seen=""  # the last answer request_state() gave, for the timeout
 
