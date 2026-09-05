@@ -25,7 +25,8 @@ inputs:
       closed. The first review historically lands within ~3.5 min end-to-end.
       Under `require-head-review` this window has to cover the whole
       push-to-review cycle rather than a review already in flight — measured at
-      4-6 min typical and 9.2 min worst case, which the default still clears.
+      a few minutes typically, and occasionally longer — mostly when GitHub is
+      slow to file the request rather than Copilot slow to review.
       The action wraps its own script in `timeout` at this value plus one poll
       interval plus a two-minute grace, so there is no second number to keep in
       sync. That ceiling is the STEP's, not the job's — a composite action cannot
@@ -65,7 +66,8 @@ inputs:
       whoever drives the merge. The review of a new head lands 4-6 min after the
       push, which is routinely AFTER the pull request's CI has gone green, so a
       gate happy with any review merges a head Copilot never looked at — measured
-      at 15 of 44 pull requests in one repository over two days.
+      at roughly a third of the pull requests merged in one repository over two
+      days.
       What pays for the dead-lock above is the re-request, which changes shape
       here: rather than answering a refusal, the gate asks again only when
       GitHub has no Copilot review request outstanding on the pull request —
@@ -177,11 +179,10 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REQUIRE_HEAD_REVIEW: ${{ inputs.require-head-review }}
         # A constant, and an input on purpose is what it is NOT: it describes how
-        # long GitHub takes to register the review request it makes itself
-        # (20-90 s after the push, measured), which no repository configures. It
-        # is passed here rather than left to the script's own default so that a
-        # value in the calling job's `env:` cannot reach in and turn the debounce
-        # off — a step's `env:` wins over the job's, and the script's `:=` default
+        # often this gate reads a pull request, which no repository configures.
+        # It is passed here rather than left to the script's own default so that
+        # a value in the calling job's `env:` cannot reach in and turn the debounce
+        # off — a step's `env:` wins over the job's, and the script's `=` default
         # would not have.
         HEAD_REQUEST_GRACE: "120"
       # Every value reaches the script through `env:` above — never `${{ }}`
