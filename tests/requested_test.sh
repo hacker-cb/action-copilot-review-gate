@@ -39,7 +39,7 @@ PY
 # otherwise — and the one before it, for the overlapping-push cases.
 HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$FIXTURE")"
 PREV="$(jq -r '[ .[] | select(.event == "committed") ] | .[-2] | .sha' "$FIXTURE")"
-if [ -z "$HEAD" ] || [ -z "$PREV" ]; then
+if [ -z "$HEAD" ] || [ "$HEAD" = "null" ] || [ -z "$PREV" ] || [ "$PREV" = "null" ]; then
   echo "FATAL: the fixture needs at least two pushes"; exit 1
 fi
 # Where the last round's request sits, so every cut point below is derived too.
@@ -135,7 +135,11 @@ echo "requested.jq — a force-push's own request, as the bound reads it today"
 # base and reverted.
 TIE="$HERE/fixtures/timeline/force-push-request-first.json"
 TIE_HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$TIE")"
-[ -n "$TIE_HEAD" ] || { echo "FATAL: the tie fixture carries no committed head"; exit 1; }
+# `jq -r` prints the string `null` for a missing head, which `-n` accepts — the same
+# trap the marker check below was already written against, two lines apart.
+if [ -z "$TIE_HEAD" ] || [ "$TIE_HEAD" = "null" ]; then
+  echo "FATAL: the tie fixture carries no committed head"; exit 1
+fi
 # Derived, never re-typed: the cut lands right after the force-push marker, which is
 # the moment the gate's first state read falls into on a real run.
 TIE_MARKER="$(jq '[ to_entries[] | select(.value.event == "head_ref_force_pushed") | .key ] | last' "$TIE")"
