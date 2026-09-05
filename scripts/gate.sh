@@ -74,13 +74,12 @@ set -euo pipefail
 # below rather than be rewritten into one of the two answers on the way.
 : "${REQUIRE_HEAD_REVIEW=false}"
 # How long the head-aware gate waits before deciding a review request is missing
-# rather than merely young. GitHub registers the automatic request 20-90 s after
-# the push completes, so a gate that starts inside that window and asks again
-# collects a duplicate review of the same commit — the failure the manual
-# `gh pr edit --add-reviewer` workaround is known for. NOT an input: it describes
-# GitHub's own registration latency, which no repository configures, and
-# action.yml passes it explicitly so that a value in the job's `env:` cannot
-# reach in and turn the debounce off.
+# rather than merely young. Not a registration lag — where GitHub files the request
+# it does so within seconds of the push — but the rate at which this gate reads a
+# pull request at all: one timeline call per hold rather than one per poll. NOT an
+# input: how often the gate reads is not a repository's choice, and action.yml
+# passes it explicitly so that a value in the job's `env:` cannot reach in and
+# turn the hold off.
 #
 # `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: `:=` would
 # rewrite an EMPTY value to 120 before the check below ever saw it, so the one
@@ -128,17 +127,20 @@ case "$REQUIRE_HEAD_REVIEW" in
      exit 1 ;;
 esac
 
-# Copilot does not review drafts or bot-authored PRs (e.g. Dependabot), so
-# requiring its review there would deadlock. Pass the gate at once. Bots are
-# detected by GitHub's account type rather than a login-suffix glob.
+# Copilot is not requested automatically on a draft or on a bot-authored PR (e.g.
+# Dependabot), so waiting for a review there would deadlock on one that is not
+# coming. Pass the gate at once. Asked explicitly it does review a bot's pull
+# request, so where something in the repository asks, this passes without the
+# review that would have arrived — the trade against hanging every Dependabot PR.
+# Bots are detected by GitHub's account type rather than a login-suffix glob.
 if [ "$IS_DRAFT" = "true" ]; then
   echo "Draft PR: Copilot review not expected — gate passes."
   summarize "**Copilot review gate** — passed: draft pull request, no Copilot review expected."
   exit 0
 fi
 if [ "$AUTHOR_TYPE" = "Bot" ]; then
-  echo "Bot author '$AUTHOR': Copilot does not review — gate passes."
-  summarize "**Copilot review gate** — passed: bot author \`$AUTHOR\`, which Copilot does not review."
+  echo "Bot author '$AUTHOR': Copilot is not requested automatically — gate passes."
+  summarize "**Copilot review gate** — passed: bot author \`$AUTHOR\`, which Copilot is not automatically requested on."
   exit 0
 fi
 
