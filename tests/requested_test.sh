@@ -148,7 +148,7 @@ TIE_AT=$(( TIE_MARKER + 1 ))
 
 # WRONG, and recorded so a fix has something to flip. Copilot answered this very
 # head 106 seconds after the cut this scenario takes.
-check "the request its own force-push filed" absent \
+check "WRONG: the request its own force-push filed" absent \
   "$(jq --argjson n "$TIE_AT" '.[0:$n]' "$TIE" | state "$TIE_HEAD")"
 check "and its own review answers it"        absent \
   "$(state "$TIE_HEAD" < "$TIE")"
@@ -199,7 +199,7 @@ check "a request Copilot already took"       absent \
 # WRONG for the same reason, and one step worse: nothing here even resembles an
 # answer — a label, a rename, a review request for a human — yet the request is
 # still discarded.
-check "an unrelated event between the two"   absent \
+check "WRONG: an unrelated event between the two" absent \
   "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
                 committer: { date: "2026-09-02T15:19:00Z" } },
               { event: "review_requested", created_at: "2026-09-02T15:19:30Z",
