@@ -169,8 +169,9 @@ request outstanding** on the pull request — which is exactly that push — and
 when one is pending, so it never produces the duplicate reviews an unconditional
 `gh pr edit --add-reviewer` does. The two-minute debounce before the first read is not
 a registration lag: GitHub almost always files the automatic request within seconds of
-the push. It is the rate at which the pull request is read at all, which is why the
-extra API call is per debounce rather than per poll.
+the push. It is how often the gate reads the *request state* — the issue timeline —
+which is why that extra API call is per debounce rather than per poll. Reviews are
+still read every poll.
 
 Copilot answering *without* reviewing — the backend apology — needs no special case
 here: that answer is a review record like any other, so the timeline dates it

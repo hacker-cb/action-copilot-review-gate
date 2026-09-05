@@ -35,7 +35,7 @@ WORK="$HERE/.tmp"
 REVIEWERS=$'copilot-pull-request-reviewer[bot]\ncopilot'
 MARKERS=$'pull request overview\n<summary>review details'
 # HEAD_REQUEST_GRACE is defaulted to 0 in run_gate rather than here: it is a
-# debounce on how often the pull request is read, not a lag to wait out, and a
+# debounce on how often the issue timeline is read, not a lag to wait out, and a
 # suite honouring it would sit out two minutes per head-aware scenario. The one
 # scenario that asserts the debounce sets it explicitly.
 #
@@ -386,8 +386,8 @@ expect "re-requests" 1     "$(edits)"
 expect "names the head" found "$(found 'Re-requested a Copilot review of head')"
 
 scenario "the grace debounces the first re-request"
-# The debounce is what keeps the gate from reading the pull request on every poll;
-# the scenario below asserts that the first read waits it out.
+# The debounce is what keeps the gate from re-reading the issue timeline on every
+# poll; the scenario below asserts that the first such read waits it out.
 arr 1
 expect "exit"        1    "$(REQUIRE_HEAD_REVIEW=true HEAD_REQUEST_GRACE=30 status 3 1)"
 expect "re-requests" 0    "$(edits)"

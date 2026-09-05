@@ -75,11 +75,11 @@ set -euo pipefail
 : "${REQUIRE_HEAD_REVIEW=false}"
 # How long the head-aware gate waits before deciding a review request is missing
 # rather than merely young. Not a registration lag: GitHub almost always files the
-# request within seconds of the push. It is the rate at which this gate reads a pull
-# request at all: one timeline call per debounce rather than one per poll. NOT an
-# input: how often the gate reads is not a repository's choice, and action.yml passes
-# it explicitly so that a value in the job's `env:` cannot reach in and turn the
-# debounce off.
+# request within seconds of the push. It is how often this gate re-reads the issue
+# timeline for the request state — one timeline call per debounce rather than one per
+# poll, while the reviews endpoint is still read every poll. NOT an input: how often
+# the gate reads is not a repository's choice, and action.yml passes it explicitly so
+# that a value in the job's `env:` cannot reach in and turn the debounce off.
 #
 # `=` and not `:=`, for the reason spelled out over UNABLE_POLICY: `:=` would
 # rewrite an EMPTY value to 120 before the check below ever saw it, so the one

@@ -179,7 +179,8 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REQUIRE_HEAD_REVIEW: ${{ inputs.require-head-review }}
         # A constant, and an input on purpose is what it is NOT: it describes how
-        # often this gate reads a pull request, which no repository configures.
+        # often this gate re-reads the issue timeline for the request state, which
+        # no repository configures.
         # It is passed here rather than left to the script's own default so that
         # a value in the calling job's `env:` cannot reach in and turn the debounce
         # off — a step's `env:` wins over the job's, and the script's `=` default
