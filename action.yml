@@ -179,11 +179,9 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REQUIRE_HEAD_REVIEW: ${{ inputs.require-head-review }}
         # A constant, and an input on purpose is what it is NOT: it describes how
-        # long GitHub takes to register the review request it makes itself
-        # — where GitHub files the request it does so within seconds, so this is
-        # the read rate rather than a lag to wait out. It
-        # is passed here rather than left to the script's own default so that a
-        # value in the calling job's `env:` cannot reach in and turn the debounce
+        # often this gate reads a pull request, which no repository configures.
+        # It is passed here rather than left to the script's own default so that
+        # a value in the calling job's `env:` cannot reach in and turn the hold
         # off — a step's `env:` wins over the job's, and the script's `:=` default
         # would not have.
         HEAD_REQUEST_GRACE: "120"

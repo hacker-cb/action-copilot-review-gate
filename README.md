@@ -116,7 +116,9 @@ and pays for that dead-lock a different way — see
 
 Four cases pass without a review, because requiring one would deadlock: a **draft**
 PR, a **bot-authored** PR (Dependabot and friends — Copilot is not requested
-automatically there, so no review is coming to wait for),
+automatically there, so nothing is on its way to wait for — asked explicitly it
+does review one, so where something in the repository asks, this passes without
+the review that would have arrived),
 a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
 answered it had **nothing reviewable in** *at the current head* — the one of the four
 you can switch off.
@@ -146,7 +148,7 @@ Copilot never looked at, on a gate that is honestly green: it has a review, of a
 earlier commit. Measured over the pull requests merged into one repository across
 two days, **roughly a third were merged before the review of their final head
 arrived** — by a few minutes. The share moves with how fast a repository merges
-after its last push, so treat it as an order of magnitude rather than a rate.
+after its last push, so treat it as a rough share rather than a measured rate.
 
 ```yaml
       - uses: hacker-cb/action-copilot-review-gate@v1
