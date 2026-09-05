@@ -182,7 +182,7 @@ runs:
         # often this gate reads a pull request, which no repository configures.
         # It is passed here rather than left to the script's own default so that
         # a value in the calling job's `env:` cannot reach in and turn the debounce
-        # off — a step's `env:` wins over the job's, and the script's `:=` default
+        # off — a step's `env:` wins over the job's, and the script's `=` default
         # would not have.
         HEAD_REQUEST_GRACE: "120"
       # Every value reaches the script through `env:` above — never `${{ }}`

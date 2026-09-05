@@ -130,7 +130,7 @@ esac
 
 # Copilot is not requested automatically on a draft or on a bot-authored PR (e.g.
 # Dependabot), so waiting for a review there would deadlock on one that is not
-# coming. Pass the gate at once. Asked explicitly it does review a bot's pull
+# coming. Pass the gate at once. Asked explicitly, it does review a bot's pull
 # request, so where something in the repository asks, this passes without the
 # review that would have arrived — the trade against hanging every Dependabot PR.
 # Bots are detected by GitHub's account type rather than a login-suffix glob.

@@ -116,12 +116,11 @@ and pays for that dead-lock a different way — see
 
 Four cases pass without a review, because requiring one would deadlock: a **draft**
 PR, a **bot-authored** PR (Dependabot and friends — Copilot is not requested
-automatically there, so nothing is on its way to wait for — asked explicitly it
-does review one, so where something in the repository asks, this passes without
-the review that would have arrived),
-a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
-answered it had **nothing reviewable in** *at the current head* — the one of the four
-you can switch off.
+automatically there, so nothing is on its way to wait for; asked explicitly, it
+does review one, so where something in the repository asks, this passes without the
+review that would have arrived), a PR that was **closed or merged while the gate was
+waiting**, and a PR Copilot answered it had **nothing reviewable in** *at the current
+head* — the one of the four you can switch off.
 
 Every verdict the gate reaches writes a one-line summary line, so a gate that passed
 *without* a review says so on the run page rather than only in a log someone has to
