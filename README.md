@@ -169,9 +169,10 @@ of answering a refusal, the gate asks again only when GitHub has **no Copilot re
 request outstanding** on the pull request — which is exactly that push — and waits
 when one is pending, so it never produces the duplicate reviews an unconditional
 `gh pr edit --add-reviewer` does. The two-minute debounce before the first read is not
-a registration lag — where GitHub files the automatic request it does so within
-seconds — but the rate at which the pull request is read at all, which is why the
-extra API call is per debounce rather than per poll.
+a registration lag: GitHub almost always files the automatic request within seconds of
+the push, and where it does not the delay usually runs well past two minutes anyway.
+It is the rate at which the pull request is read at all, which is why the extra API
+call is per debounce rather than per poll.
 
 Copilot answering *without* reviewing — the backend apology — needs no special case
 here: that answer is a review record like any other, so the timeline dates it
