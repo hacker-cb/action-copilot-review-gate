@@ -115,10 +115,12 @@ and pays for that dead-lock a different way — see
 [Gating on the current head](#gating-on-the-current-head).
 
 Four cases pass without a review, because requiring one would deadlock: a **draft**
-PR, a **bot-authored** PR (Dependabot and friends — Copilot does not review either),
-a PR that was **closed or merged while the gate was waiting**, and a PR Copilot
-answered it had **nothing reviewable in** *at the current head* — the one of the four
-you can switch off.
+PR, a **bot-authored** PR (Dependabot and friends — Copilot is not requested
+automatically there, so nothing is on its way to wait for; asked explicitly, it
+does review one, so where something in the repository asks, this passes without the
+review that would have arrived), a PR that was **closed or merged while the gate was
+waiting**, and a PR Copilot answered it had **nothing reviewable in** *at the current
+head* — the one of the four you can switch off.
 
 Every verdict the gate reaches writes a one-line summary line, so a gate that passed
 *without* a review says so on the run page rather than only in a log someone has to
@@ -142,9 +144,10 @@ before Copilot has posted anything — but not the one after it. A review of a *
 head lands 4–6 minutes after the push that made it, which is routinely *after* that
 pull request's CI has gone green. So "checks green, merge on green" merges a head
 Copilot never looked at, on a gate that is honestly green: it has a review, of an
-earlier commit. Measured over 44 pull requests merged in one repository across two
-days, **15 were merged before the review of their final head arrived** — by 0.3 to
-4.4 minutes.
+earlier commit. Measured over the pull requests merged into one repository across
+two days, **roughly a third were merged before the review of their final head
+arrived** — by a few minutes. The share moves with how fast a repository merges
+after its last push, so treat it as a rough share rather than a measured rate.
 
 ```yaml
       - uses: hacker-cb/action-copilot-review-gate@v1
@@ -164,11 +167,11 @@ this mode the re-request is what unblocks it, and it changes shape to do so. Ins
 of answering a refusal, the gate asks again only when GitHub has **no Copilot review
 request outstanding** on the pull request — which is exactly that push — and waits
 when one is pending, so it never produces the duplicate reviews an unconditional
-`gh pr edit --add-reviewer` does. A two-minute debounce covers GitHub's own
-registration lag (it files the automatic request 20–90 s after the push completes),
-so a gate that starts inside that window does not ask for a review that was already
-coming — and it doubles as the rate at which the pull request is read at all, which
-is why the extra API call is per debounce rather than per poll.
+`gh pr edit --add-reviewer` does. The two-minute debounce before the first read is not
+a registration lag: GitHub almost always files the automatic request within seconds of
+the push. It is how often the gate reads the *request state* — the issue timeline —
+which is why that extra API call is per debounce rather than per poll. Reviews are
+still read every poll.
 
 Copilot answering *without* reviewing — the backend apology — needs no special case
 here: that answer is a review record like any other, so the timeline dates it
@@ -209,7 +212,9 @@ above cancels the older one.
 **The cost** is roughly 4–6 minutes on a pull request's final push. CI and the review
 run concurrently, so it is the tail that shows — but `wait-minutes` now has to cover
 the whole push-to-review cycle rather than just a review already in flight. The
-default of 15 clears the measured worst case of 9.2 minutes with room. Where the
+default of 15 covers the usual case but not every one: the cycle occasionally runs
+longer, mostly when GitHub is slow to file the request rather than Copilot slow to
+review, so raise it if your repository's tail looks like that. Where the
 gate has to ask for the review itself, add the two-minute debounce before its first
 request to whatever the review then takes; a window no longer than that debounce
 never reaches a request at all, and the gate says so. If you raise `wait-minutes`,

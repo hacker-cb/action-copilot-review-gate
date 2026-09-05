@@ -39,7 +39,7 @@ PY
 # otherwise — and the one before it, for the overlapping-push cases.
 HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$FIXTURE")"
 PREV="$(jq -r '[ .[] | select(.event == "committed") ] | .[-2] | .sha' "$FIXTURE")"
-if [ -z "$HEAD" ] || [ -z "$PREV" ]; then
+if [ -z "$HEAD" ] || [ "$HEAD" = "null" ] || [ -z "$PREV" ] || [ "$PREV" = "null" ]; then
   echo "FATAL: the fixture needs at least two pushes"; exit 1
 fi
 # Where the last round's request sits, so every cut point below is derived too.
@@ -100,6 +100,119 @@ check "and once its request lands"          pending \
   "$(jq '. + [{ event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:00Z" },
               { event: "review_requested", created_at: "2026-09-02T15:20:05Z",
                 requested_reviewer: { login: "Copilot", type: "Bot" } }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+
+echo
+echo "requested.jq — a force-push's own request, as the bound reads it today"
+
+# CHARACTERISATION, not approval. Every scenario below records what the shipped
+# filter answers right now; two of them record an answer that is WRONG, and say so.
+# They are here because the bug was found with no test able to see it, and because
+# the fix was attempted and withdrawn: three review rounds turned up a regression in
+# each of the first two attempts, and the suite stayed green through both. Pinning
+# today's answers is what a later attempt gets to start from.
+#
+# The order the first block above tests — marker, then request — is the one GitHub
+# records LESS often. A second capture, from the public hacker-cb/claude-manager#129,
+# carries the common one: the request first and the `head_ref_force_pushed` marker
+# after it, because GitHub files the request for a force-pushed head before it
+# records the marker. Measured across 55 such pairs in four repositories: 38 share a
+# second, 17 straddle one, and none is further apart than that.
+#
+# `$pushed` sits on the marker, so the request the same push produced falls behind
+# the bound and is discarded. The filter answers `absent` while Copilot is already
+# at work, and the head-aware gate then asks again and collects a duplicate review of
+# one commit — the failure this whole file exists to prevent. It costs a review and a
+# unit of `max-rerequests`; it can never open the gate, because the pass branch is
+# fed by classify.jq alone. Nobody pays it today either: `require-head-review` is off
+# in every consumer, and the request path is closed behind it.
+#
+# What makes it hard, and why the naive fixes failed: a request in front of the
+# marker belongs to THIS head only when the head's own push is the last one before
+# it. Walking back over adjacent requests re-opens the dead-lock on an ordinary
+# `committed`; walking back to the last event that consumed a request re-opens it
+# when the force-push carries no request of its own. Both were measured against the
+# base and reverted.
+TIE="$HERE/fixtures/timeline/force-push-request-first.json"
+TIE_HEAD="$(jq -r '[ .[] | select(.event == "committed") ] | last | .sha' "$TIE")"
+# `jq -r` prints the string `null` for a missing head, which `-n` accepts — the same
+# trap the marker check below was already written against, two lines apart.
+if [ -z "$TIE_HEAD" ] || [ "$TIE_HEAD" = "null" ]; then
+  echo "FATAL: the tie fixture carries no committed head"; exit 1
+fi
+# Derived, never re-typed: the cut lands right after the force-push marker, which is
+# the moment the gate's first state read falls into on a real run.
+TIE_MARKER="$(jq '[ to_entries[] | select(.value.event == "head_ref_force_pushed") | .key ] | last' "$TIE")"
+# Checked like the head above, and for the same reason: a recapture without the
+# marker would leave `null` here, `$(( null + 1 ))` would quietly evaluate to 1, and
+# every scenario below would then assert against `.[0:1]` — a different timeline
+# entirely, passing while covering nothing.
+[ "$TIE_MARKER" != "null" ] || { echo "FATAL: the tie fixture carries no head_ref_force_pushed"; exit 1; }
+TIE_AT=$(( TIE_MARKER + 1 ))
+
+# WRONG, and recorded so a fix has something to flip. Copilot answered this very
+# head 106 seconds after the cut this scenario takes.
+check "WRONG: the request its own force-push filed" absent \
+  "$(jq --argjson n "$TIE_AT" '.[0:$n]' "$TIE" | state "$TIE_HEAD")"
+check "and its own review answers it"        absent \
+  "$(state "$TIE_HEAD" < "$TIE")"
+# The guard on the walk: an answered request is not adjacent to the next marker,
+# because Copilot's own events land between them. Splice a review of another commit
+# into the gap and the request stops counting, which is what keeps a stale one from
+# being read as this head's.
+check "an answered request does not tie"     absent \
+  "$(jq --argjson n "$TIE_AT" '.[0:$n-1]
+       + [{ event: "reviewed", submitted_at: "2026-08-23T03:42:29Z",
+            commit_id: "1111111111111111111111111111111111111111",
+            user: { login: "Copilot", type: "Bot" } }]
+       + .[$n-1:$n]' "$TIE" | state "$TIE_HEAD")"
+# The inversion belongs to the force-push marker alone. An ordinary `committed`
+# exists before anything could be requested for it, so a request in front of one is
+# the PREVIOUS head's — and counting it would hand back the dead-lock the bound was
+# written to close: the review that eventually lands is of the older commit, cannot
+# clear this head, and the state would stay `pending` until the window burned out
+# with the re-request budget unspent.
+check "a request in front of an ordinary push" absent \
+  "$(jq '. + [{ event: "review_requested", created_at: "2026-09-02T15:19:00Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } },
+              { event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:20:00Z" } }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+# The shapes a fix has to keep answering `absent`, kept beside the two it has to
+# flip. A request filed before the head entered the timeline is the older head's,
+# marker behind it or not.
+check "a request before the head's own push"  absent \
+  "$(jq '. + [{ event: "review_requested", created_at: "2026-09-02T15:19:00Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } },
+              { event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:20:00Z" } },
+              { event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:01Z",
+                commit_id: "cafebabecafebabecafebabecafebabecafebabe" }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+# And one Copilot has already picked up is spent: it is reading the tree as it
+# stood, so its review answers the head being replaced rather than this one.
+check "a request Copilot already took"       absent \
+  "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:19:00Z" } },
+              { event: "review_requested", created_at: "2026-09-02T15:19:30Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } },
+              { event: "copilot_work_started", created_at: "2026-09-02T15:20:00Z" },
+              { event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:01Z",
+                commit_id: "cafebabecafebabecafebabecafebabecafebabe" }]' "$FIXTURE" \
+     | state cafebabecafebabecafebabecafebabecafebabe)"
+# WRONG for the same reason, and one step worse: nothing here even resembles an
+# answer — a label, a rename, a review request for a human — yet the request is
+# still discarded.
+check "WRONG: an unrelated event between the two" absent \
+  "$(jq '. + [{ event: "committed", sha: "cafebabecafebabecafebabecafebabecafebabe",
+                committer: { date: "2026-09-02T15:19:00Z" } },
+              { event: "review_requested", created_at: "2026-09-02T15:19:30Z",
+                requested_reviewer: { login: "Copilot", type: "Bot" } },
+              { event: "review_requested", created_at: "2026-09-02T15:20:00Z",
+                requested_reviewer: { login: "alice", type: "User" } },
+              { event: "labeled", created_at: "2026-09-02T15:20:00Z" },
+              { event: "head_ref_force_pushed", created_at: "2026-09-02T15:20:01Z",
+                commit_id: "cafebabecafebabecafebabecafebabecafebabe" }]' "$FIXTURE" \
      | state cafebabecafebabecafebabecafebabecafebabe)"
 
 echo
